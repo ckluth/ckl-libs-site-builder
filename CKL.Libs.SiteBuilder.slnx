@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="CKL.Libs.SiteBuilder/CKL.Libs.SiteBuilder.csproj" />
+  <Project Path="CKL.Libs.SiteBuilder.Tests/CKL.Libs.SiteBuilder.Tests.csproj" />
+</Solution>

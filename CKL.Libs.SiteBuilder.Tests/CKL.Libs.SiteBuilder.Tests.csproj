@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Library</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<LangVersion>latest</LangVersion>
+		<AssemblyName>CKL.Libs.SiteBuilder.Tests</AssemblyName>
+		<RootNamespace>CKL.Libs.SiteBuilder.Tests</RootNamespace>
+		<PlatformTarget>AnyCPU</PlatformTarget>
+	</PropertyGroup>
+	<ItemGroup>
+		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.3.0"/>
+		<PackageReference Include="NUnit" Version="4.5.0"/>
+		<PackageReference Include="NUnit3TestAdapter" Version="6.1.0"/>
+	</ItemGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\CKL.Libs.SiteBuilder\CKL.Libs.SiteBuilder.csproj"/>
+	</ItemGroup>
+</Project>
