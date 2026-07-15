@@ -14,15 +14,20 @@ internal static class SiteAssembler
 {
     public static Result<SiteModel> Assemble(string sourceDir, IMetadataInference? inference = null)
     {
-        var result = AssembleConfigured([sourceDir], null, inference);
+        var effectiveInference = inference ?? NoOpMetadataInference.Instance;
+        var scaffold = NavMapScaffolder.BuildInMemory([sourceDir], effectiveInference);
+        if (!scaffold.Succeeded) return scaffold.ToResult<SiteModel>();
+
+        var result = AssembleConfigured([sourceDir], scaffold.Value, inference);
         if (!result.Succeeded) return result.ToResult<SiteModel>();
         return result.Value.Site;
     }
 
     public static Result<SiteAssemblyResult> AssembleConfigured(
         IReadOnlyList<string> scanRoots,
-        NavMap? navMap,
-        IMetadataInference? inference = null)
+        NavMap navMap,
+        IMetadataInference? inference = null,
+        SectionBehaviour sectionBehaviour = SectionBehaviour.Expand)
     {
         try
         {
@@ -31,19 +36,8 @@ internal static class SiteAssembler
 
             var discovered = DiscoverPages(scanRoots, metadataIndex.Value);
 
-            if (navMap is null)
-            {
-                var legacyPages = discovered
-                    .Select(page => page.ToLegacySiteNode())
-                    .OrderBy(page => page.RelativeSource, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                var legacyNav = BuildNav(legacyPages);
-                return new SiteAssemblyResult(new SiteModel(legacyPages, legacyNav), []);
-            }
-
             var drift = DriftDetector.Detect(discovered.Select(page => page.RelativeSource), navMap);
-            var mapped = AssembleFromNavMap(discovered, metadataIndex.Value, navMap);
+            var mapped = AssembleFromNavMap(discovered, metadataIndex.Value, navMap, sectionBehaviour);
             if (!mapped.Succeeded) return mapped.ToResult<SiteAssemblyResult>();
 
             return new SiteAssemblyResult(mapped.Value, drift);
@@ -54,10 +48,35 @@ internal static class SiteAssembler
         }
     }
 
+    /// <summary>Discovers pages under the scan roots and projects them as ordinary (unmapped) site nodes, for nav-map scaffolding.</summary>
+    internal static Result<IReadOnlyList<SiteNode>> DiscoverPagesForScaffold(
+        IReadOnlyList<string> scanRoots,
+        IMetadataInference inference)
+    {
+        try
+        {
+            var metadataIndex = MetadataIndex.Build(scanRoots, inference);
+            if (!metadataIndex.Succeeded) return metadataIndex.ToResult<IReadOnlyList<SiteNode>>();
+
+            var discovered = DiscoverPages(scanRoots, metadataIndex.Value);
+            IReadOnlyList<SiteNode> nodes = discovered
+                .Select(page => page.ToMappedSiteNode(page.Title, ToOutputPath(page.RelativeSource), page.Kind))
+                .OrderBy(page => page.RelativeSource, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            return Result<IReadOnlyList<SiteNode>>.Success(nodes);
+        }
+        catch (Exception ex)
+        {
+            return Result<IReadOnlyList<SiteNode>>.Fail(ex);
+        }
+    }
+
     static Result<SiteModel> AssembleFromNavMap(
         IReadOnlyList<DiscoveredPage> discovered,
         MetadataIndex metadataIndex,
-        NavMap navMap)
+        NavMap navMap,
+        SectionBehaviour sectionBehaviour)
     {
         try
         {
@@ -66,6 +85,7 @@ internal static class SiteAssembler
             var navNodes = new List<SiteNavNode>();
             var placedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var usedOutputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var homeSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             AppendMappedEntries(
                 navMap.Entries,
@@ -74,7 +94,24 @@ internal static class SiteAssembler
                 navNodes,
                 bySource,
                 placedSources,
-                usedOutputs);
+                usedOutputs,
+                homeSources,
+                sectionBehaviour);
+
+            if (!usedOutputs.Contains("index.html"))
+            {
+                var landingHtml = BuildNodeIndexHtml("Home", "index.html", navNodes);
+                EnsureOutputAvailable("index.html", usedOutputs);
+                pages.Add(new SiteNode(
+                    SourcePath: null,
+                    RelativeSource: "",
+                    RelativeOutput: "index.html",
+                    Title: "Home",
+                    Kind: SiteNodeKind.Landing,
+                    Overrides: SiteNode.NoOverrides,
+                    GeneratedHtml: landingHtml));
+                navNodes.Insert(0, new SiteNavNode("Home", new SiteNavPage("Home", "index.html"), []));
+            }
 
             var searchPage = BuildSearchNode(metadataIndex, pages, usedOutputs);
             pages.Add(searchPage);
@@ -97,7 +134,9 @@ internal static class SiteAssembler
         List<SiteNavNode> navNodes,
         IReadOnlyDictionary<string, DiscoveredPage> bySource,
         ISet<string> placedSources,
-        ISet<string> usedOutputs)
+        ISet<string> usedOutputs,
+        ISet<string> homeSources,
+        SectionBehaviour sectionBehaviour)
     {
         var reservedSlugs = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
@@ -119,14 +158,26 @@ internal static class SiteAssembler
                 if (!placedSources.Add(entry.Source!))
                     throw new InvalidOperationException($"The nav map places '{entry.Source}' more than once.");
 
-                var relativeOutput = IsRootHomeEntry(currentDirectory, entry)
-                    ? "index.html"
-                    : CombineOutput(currentDirectory, slug + ".html");
-                EnsureOutputAvailable(relativeOutput, usedOutputs);
+                string relativeOutput;
+                SiteNodeKind kind;
 
-                var kind = relativeOutput.Equals("index.html", StringComparison.OrdinalIgnoreCase)
-                    ? SiteNodeKind.Landing
-                    : SiteNodeKind.Document;
+                if (entry.Home)
+                {
+                    if (homeSources.Count > 0)
+                        throw new InvalidOperationException(
+                            $"The nav map designates more than one entry as home ('{homeSources.First()}' and '{entry.Source}'); exactly one entry may have 'home: true'.");
+
+                    homeSources.Add(entry.Source!);
+                    relativeOutput = "index.html";
+                    kind = SiteNodeKind.Landing;
+                }
+                else
+                {
+                    relativeOutput = CombineOutput(currentDirectory, slug + ".html");
+                    kind = SiteNodeKind.Document;
+                }
+
+                EnsureOutputAvailable(relativeOutput, usedOutputs);
 
                 var node = discovered.ToMappedSiteNode(entry.Title, relativeOutput, kind);
                 pages.Add(node);
@@ -136,6 +187,7 @@ internal static class SiteAssembler
 
             var sectionDirectory = CombineOutput(currentDirectory, slug);
             var childNavNodes = new List<SiteNavNode>();
+            var effectiveBehaviour = entry.Section ?? sectionBehaviour;
 
             AppendMappedEntries(
                 entry.Children,
@@ -144,25 +196,34 @@ internal static class SiteAssembler
                 childNavNodes,
                 bySource,
                 placedSources,
-                usedOutputs);
+                usedOutputs,
+                homeSources,
+                effectiveBehaviour);
 
-            var sectionOutput = Path.Combine(sectionDirectory, "index.html");
-            EnsureOutputAvailable(sectionOutput, usedOutputs);
+            if (effectiveBehaviour == SectionBehaviour.Overview)
+            {
+                var sectionOutput = Path.Combine(sectionDirectory, "index.html");
+                EnsureOutputAvailable(sectionOutput, usedOutputs);
 
-            var generatedHtml = BuildNodeIndexHtml(entry.Title, sectionOutput, childNavNodes);
-            pages.Add(new SiteNode(
-                SourcePath: null,
-                RelativeSource: "",
-                RelativeOutput: sectionOutput,
-                Title: entry.Title,
-                Kind: SiteNodeKind.NodeIndex,
-                Overrides: SiteNode.NoOverrides,
-                GeneratedHtml: generatedHtml));
+                var generatedHtml = BuildNodeIndexHtml(entry.Title, sectionOutput, childNavNodes);
+                pages.Add(new SiteNode(
+                    SourcePath: null,
+                    RelativeSource: "",
+                    RelativeOutput: sectionOutput,
+                    Title: entry.Title,
+                    Kind: SiteNodeKind.NodeIndex,
+                    Overrides: SiteNode.NoOverrides,
+                    GeneratedHtml: generatedHtml));
 
-            navNodes.Add(new SiteNavNode(
-                entry.Title,
-                new SiteNavPage("Overview", sectionOutput),
-                childNavNodes));
+                navNodes.Add(new SiteNavNode(
+                    entry.Title,
+                    new SiteNavPage("Overview", sectionOutput),
+                    childNavNodes));
+            }
+            else
+            {
+                navNodes.Add(new SiteNavNode(entry.Title, null, childNavNodes));
+            }
         }
     }
 
@@ -335,78 +396,9 @@ internal static class SiteAssembler
         var fileName = Path.GetFileName(relativeSourcePath);
         var dir = Path.GetDirectoryName(relativeSourcePath) ?? "";
 
-        var outputFileName = fileName.Equals("README.md", StringComparison.OrdinalIgnoreCase)
-                             || fileName.Equals("_index.md", StringComparison.OrdinalIgnoreCase)
-            ? "index.html"
-            : Path.ChangeExtension(fileName, ".html");
+        var outputFileName = Path.ChangeExtension(fileName, ".html");
 
         return dir.Length > 0 ? Path.Combine(dir, outputFileName) : outputFileName;
-    }
-
-    internal static List<SiteNavNode> BuildNav(List<SiteNode> pages)
-    {
-        var nodes = new List<SiteNavNode>();
-
-        var homePage = pages.FirstOrDefault(page =>
-            page.RelativeOutput.Equals("index.html", StringComparison.OrdinalIgnoreCase));
-        if (homePage is not null)
-            nodes.Add(new SiteNavNode(homePage.Title, new SiteNavPage(homePage.Title, "index.html"), []));
-
-        foreach (var directory in GetTopLevelDirectories(pages))
-        {
-            var node = BuildNavNode(directory, pages, depth: 1, maxDepth: 2);
-            if (node is not null) nodes.Add(node);
-        }
-
-        return nodes;
-    }
-
-    static IEnumerable<string> GetTopLevelDirectories(IEnumerable<SiteNode> pages) =>
-        pages.Select(page => page.RelativeOutput.Replace('\\', '/'))
-            .Where(path => path.Contains('/'))
-            .Select(path => path.Split('/')[0])
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
-
-    static SiteNavNode? BuildNavNode(string relativePath, List<SiteNode> pages, int depth, int maxDepth)
-    {
-        var relNorm = relativePath.Replace('\\', '/');
-        var indexOutput = relNorm + "/index.html";
-
-        var landing = pages.FirstOrDefault(page =>
-            page.RelativeOutput.Replace('\\', '/').Equals(indexOutput, StringComparison.OrdinalIgnoreCase));
-
-        if (landing is null) return null;
-
-        var title = FormatFolderName(Path.GetFileName(relativePath));
-        var landingLabel = File.ReadLines(landing.SourcePath!).FirstOrDefault()
-            ?.StartsWith("[//]: # (origin:", StringComparison.Ordinal) == true ? "README" : "Overview";
-        var landingNav = new SiteNavPage(landingLabel, landing.RelativeOutput);
-
-        var children = new List<SiteNavNode>();
-        if (depth < maxDepth)
-        {
-            foreach (var subDirectory in GetDirectChildDirectories(relativePath, pages))
-            {
-                var child = BuildNavNode(subDirectory, pages, depth + 1, maxDepth);
-                if (child is not null) children.Add(child);
-            }
-        }
-
-        return new SiteNavNode(title, landingNav, children);
-    }
-
-    static IEnumerable<string> GetDirectChildDirectories(string parentRelativePath, IEnumerable<SiteNode> pages)
-    {
-        var prefix = parentRelativePath.Replace('\\', '/') + "/";
-
-        return pages.Select(page => page.RelativeOutput.Replace('\\', '/'))
-            .Where(path => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            .Select(path => path[prefix.Length..])
-            .Where(path => path.Contains('/'))
-            .Select(path => Path.Combine(parentRelativePath, path.Split('/')[0]))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
     }
 
     internal static string? ExtractTitle(string sourcePath)
@@ -435,11 +427,6 @@ internal static class SiteAssembler
             .Split(' ', StringSplitOptions.RemoveEmptyEntries);
         return string.Join(" ", words.Select(word => char.ToUpper(word[0]) + word[1..]));
     }
-
-    static bool IsRootHomeEntry(string currentDirectory, NavMapEntry entry) =>
-        currentDirectory.Length == 0
-        && (string.Equals(entry.Source, "README.md", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(entry.Source, "_index.md", StringComparison.OrdinalIgnoreCase));
 
     static string Slugify(string value)
     {
@@ -486,9 +473,6 @@ internal static class SiteAssembler
         SiteNodeKind Kind,
         IReadOnlyDictionary<string, string> Overrides)
     {
-        public SiteNode ToLegacySiteNode() =>
-            new(SourcePath, RelativeSource, ToOutputPath(RelativeSource), Title, Kind, Overrides, SourceRoot);
-
         public SiteNode ToMappedSiteNode(string title, string relativeOutput, SiteNodeKind kind) =>
             new(SourcePath, RelativeSource, relativeOutput, title, kind, Overrides, SourceRoot);
     }

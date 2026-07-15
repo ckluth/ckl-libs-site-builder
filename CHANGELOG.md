@@ -5,6 +5,27 @@ All notable changes to `CKL.Libs.SiteBuilder` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-07-15
+
+Collapses SiteBuilder onto a single, always-generated navigation path: the
+map-less/legacy assembly branch is removed, and a missing `nav:` config now
+defaults to `nav.yml` in the current working directory, generated as a
+**complete** scaffold (every discovered document placed — no README/`_index`
+special casing). Guarantees a browsable root landing page: an entry may be
+explicitly designated `home: true`, or a landing is synthesised automatically
+listing the top-level pages and sections; there is no filename magic. Adds a
+configurable section-click behaviour (`section: expand` default, or
+`overview`, overridable per nav-map entry). The search page is now emitted
+unconditionally on every build. Applies a built-in asset-copy ignore rule
+(`.git`, `.vs`, `.vscode`, `.idea`, `bin`, `obj`, `node_modules`, and any
+dotfile/dot-directory segment) plus a configurable `assets.exclude` list.
+Guards the output directory: creates or reuses an empty directory, cleans a
+directory carrying this tool's `.sitebuilder` marker from a prior run, and
+refuses (deleting nothing) to touch an unmarked non-empty directory.
+Implements requirements R-10 (edited), R-11 (edited), R-18, R-19, R-20, R-21,
+R-22, R-23, and R-24; see `docs/requirements/README.md`, `docs/architecture.md`,
+and `docs/reference/yaml-schema.md`.
+
 ## [1.3.0] - 2026-07-15
 
 Added hand-authored YAML configuration for scan roots and output location, plus

@@ -49,7 +49,14 @@ internal static class SiteConfigReader
                 ? null
                 : ResolvePath(configDirectory, dto.Nav!, "nav map");
 
-            return new SiteConfig(title, outputDirectory, scanRoots, new SiteThemeConfig(stylesheetPath, mermaidTheme), navMapPath);
+            var sectionBehaviour = SectionBehaviourParser.TryParse(dto.Section) ?? SectionBehaviour.Expand;
+
+            var assetExcludes = (dto.Assets?.Exclude ?? [])
+                .Where(entry => !string.IsNullOrWhiteSpace(entry))
+                .Select(entry => entry.Trim())
+                .ToArray();
+
+            return new SiteConfig(title, outputDirectory, scanRoots, new SiteThemeConfig(stylesheetPath, mermaidTheme), navMapPath, sectionBehaviour, assetExcludes);
         }
         catch (Exception ex)
         {
@@ -74,11 +81,18 @@ internal static class SiteConfigReader
         public List<string>? ScanRoots { get; set; }
         public SiteThemeYaml? Theme { get; set; }
         public string? Nav { get; set; }
+        public string? Section { get; set; }
+        public AssetsYaml? Assets { get; set; }
     }
 
     sealed class SiteThemeYaml
     {
         public string? Stylesheet { get; set; }
         public string? Mermaid { get; set; }
+    }
+
+    sealed class AssetsYaml
+    {
+        public List<string>? Exclude { get; set; }
     }
 }

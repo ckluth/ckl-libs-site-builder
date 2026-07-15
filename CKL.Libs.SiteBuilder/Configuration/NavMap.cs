@@ -6,11 +6,39 @@ namespace CKL.Libs.SiteBuilder.Configuration;
 
 internal sealed record NavMap(IReadOnlyList<NavMapEntry> Entries);
 
+internal enum SectionBehaviour { Expand, Overview }
+
+internal static class SectionBehaviourParser
+{
+    public static SectionBehaviour? TryParse(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "expand" => SectionBehaviour.Expand,
+            "overview" => SectionBehaviour.Overview,
+            _ => throw new InvalidOperationException(
+                $"The section behaviour value '{value}' is invalid; expected 'expand' or 'overview'.")
+        };
+    }
+
+    public static string? ToYaml(SectionBehaviour? value) => value switch
+    {
+        null => null,
+        SectionBehaviour.Expand => "expand",
+        SectionBehaviour.Overview => "overview",
+        _ => throw new InvalidOperationException($"Unhandled section behaviour '{value}'.")
+    };
+}
+
 internal sealed record NavMapEntry(
     string Title,
     string? Source,
     IReadOnlyList<NavMapEntry> Children,
-    bool Skip = false);
+    bool Skip = false,
+    bool Home = false,
+    SectionBehaviour? Section = null);
 
 internal static class NavMapFile
 {
@@ -68,12 +96,18 @@ internal static class NavMapFile
 
         var children = (entry.Children ?? []).Select(MapEntry).ToArray();
         var source = string.IsNullOrWhiteSpace(entry.Source) ? null : entry.Source!.Trim();
+        var home = entry.Home ?? false;
+        var section = SectionBehaviourParser.TryParse(entry.Section);
 
         if (source is not null && children.Length > 0)
             throw new InvalidOperationException(
                 $"The nav map entry '{entry.Title}' cannot define both 'source' and 'children'.");
 
-        return new NavMapEntry(entry.Title.Trim(), source, children, entry.Skip ?? false);
+        if (home && source is null)
+            throw new InvalidOperationException(
+                $"The nav map entry '{entry.Title}' cannot be 'home: true' without a 'source'.");
+
+        return new NavMapEntry(entry.Title.Trim(), source, children, entry.Skip ?? false, home, section);
     }
 
     static NavMapEntryYaml MapEntry(NavMapEntry entry) =>
@@ -82,7 +116,9 @@ internal static class NavMapFile
             Title = entry.Title,
             Source = entry.Source,
             Children = entry.Children.Count == 0 ? null : entry.Children.Select(MapEntry).ToList(),
-            Skip = entry.Skip ? true : null
+            Skip = entry.Skip ? true : null,
+            Home = entry.Home ? true : null,
+            Section = SectionBehaviourParser.ToYaml(entry.Section)
         };
 
     sealed class NavMapYaml
@@ -96,5 +132,7 @@ internal static class NavMapFile
         public string? Source { get; set; }
         public List<NavMapEntryYaml>? Children { get; set; }
         public bool? Skip { get; set; }
+        public bool? Home { get; set; }
+        public string? Section { get; set; }
     }
 }

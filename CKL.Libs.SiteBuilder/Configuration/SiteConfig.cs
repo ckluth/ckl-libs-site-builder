@@ -5,7 +5,9 @@ internal sealed record SiteConfig(
     string OutputDirectory,
     IReadOnlyList<string> ScanRoots,
     SiteThemeConfig Theme,
-    string? NavMapPath);
+    string? NavMapPath,
+    SectionBehaviour SectionBehaviour,
+    IReadOnlyList<string> AssetExcludes);
 
 internal sealed record SiteThemeConfig(
     string? StylesheetPath,

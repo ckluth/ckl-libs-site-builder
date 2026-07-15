@@ -54,7 +54,7 @@ public class RendererTests
         var html = PageRenderer.Render(page, [], _tempDir, "Test Site");
 
         Assert.That(html, Does.Contain("href=\"other.html\""));
-        Assert.That(html, Does.Contain("href=\"sub/index.html\""));
+        Assert.That(html, Does.Contain("href=\"sub/README.html\""));
     }
 
     [Test]

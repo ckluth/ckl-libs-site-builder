@@ -25,7 +25,7 @@ public class AssemblerTests
     }
 
     [Test]
-    public void Assemble_DiscoversDocumentAndLandingKinds_AndWritesNoStagingFolder()
+    public void Assemble_DiscoversDocumentsAndSynthesizesLanding_AndWritesNoStagingFolder()
     {
         WriteSourceFile("README.md", "# Home\n");
         WriteSourceFile(Path.Combine("guide", "README.md"), "# Guide\n");
@@ -37,9 +37,14 @@ public class AssemblerTests
 
         Assert.That(result.Succeeded, Is.True);
         var model = result.Value!;
-        Assert.That(model.Pages.Single(p => p.RelativeSource == "README.md").Kind, Is.EqualTo(SiteNodeKind.Landing));
+        var readme = model.Pages.Single(p => p.RelativeSource == "README.md");
+        Assert.That(readme.Kind, Is.EqualTo(SiteNodeKind.Document));
+        Assert.That(readme.RelativeOutput, Is.EqualTo("home.html"));
         Assert.That(model.Pages.Single(p => p.RelativeSource.EndsWith("intro.md")).Kind, Is.EqualTo(SiteNodeKind.Document));
-        Assert.That(model.Pages.Single(p => p.RelativeOutput.Replace('\\', '/') == "guide/index.html").Kind, Is.EqualTo(SiteNodeKind.Landing));
+
+        var landing = model.Pages.Single(p => p.RelativeOutput.Replace('\\', '/') == "index.html");
+        Assert.That(landing.Kind, Is.EqualTo(SiteNodeKind.Landing));
+        Assert.That(landing.SourcePath, Is.Null);
 
         var entriesAfter = Directory.GetFileSystemEntries(_sourceDir, "*", SearchOption.AllDirectories).Length;
         Assert.That(entriesAfter, Is.EqualTo(entriesBefore));
@@ -62,7 +67,7 @@ public class AssemblerTests
             ], false)
         ]);
 
-        var result = SiteAssembler.AssembleConfigured([_sourceDir], navMap);
+        var result = SiteAssembler.AssembleConfigured([_sourceDir], navMap, sectionBehaviour: SectionBehaviour.Overview);
 
         Assert.That(result.Succeeded, Is.True);
         Assert.That(result.Value!.UnplacedDocuments, Is.Empty);

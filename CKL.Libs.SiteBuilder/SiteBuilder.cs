@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using CKL.Libs.ResultPattern;
 using CKL.Libs.SiteBuilder.Assembly;
 using CKL.Libs.SiteBuilder.Configuration;
@@ -59,22 +60,18 @@ public static class SiteBuilder
             var config = SiteConfigReader.Read(configPath);
             if (!config.Succeeded) return config.ToResult<SiteBuildReport>();
 
-            if (config.Value.NavMapPath is not null)
-            {
-                var scaffold = NavMapScaffolder.EnsureExists(
-                    config.Value.NavMapPath,
-                    config.Value.ScanRoots,
-                    metadataInference ?? NoOpMetadataInference.Instance);
-                if (!scaffold.Succeeded) return scaffold.ToResult<SiteBuildReport>();
-            }
+            var navMapPath = config.Value.NavMapPath
+                ?? Path.Combine(Directory.GetCurrentDirectory(), "nav.yml");
 
-            NavMap? navMap = null;
-            if (config.Value.NavMapPath is not null)
-            {
-                var nav = NavMapFile.Read(config.Value.NavMapPath);
-                if (!nav.Succeeded) return nav.ToResult<SiteBuildReport>();
-                navMap = nav.Value;
-            }
+            var scaffold = NavMapScaffolder.EnsureExists(
+                navMapPath,
+                config.Value.ScanRoots,
+                metadataInference ?? NoOpMetadataInference.Instance);
+            if (!scaffold.Succeeded) return scaffold.ToResult<SiteBuildReport>();
+
+            var nav = NavMapFile.Read(navMapPath);
+            if (!nav.Succeeded) return nav.ToResult<SiteBuildReport>();
+            NavMap navMap = nav.Value;
 
             var options = new SiteBuilderOptions(
                 SourceDirectory: config.Value.ScanRoots[0],
@@ -86,7 +83,7 @@ public static class SiteBuilder
                 StylesheetPath: config.Value.Theme.StylesheetPath,
                 MermaidTheme: config.Value.Theme.MermaidTheme);
 
-            return BuildCore(options, navMap);
+            return BuildCore(options, navMap, config.Value.SectionBehaviour, config.Value.AssetExcludes);
         }
         catch (Exception ex)
         {
@@ -94,13 +91,32 @@ public static class SiteBuilder
         }
     }
 
-    static Result<SiteBuildReport> BuildCore(SiteBuilderOptions options, NavMap? navMap)
+    static Result<SiteBuildReport> BuildCore(
+        SiteBuilderOptions options,
+        NavMap? navMap,
+        SectionBehaviour sectionBehaviour = SectionBehaviour.Expand,
+        IReadOnlyList<string>? assetExcludes = null)
     {
         try
         {
-            Directory.CreateDirectory(options.OutputDirectory);
+            var prepare = PrepareOutputDirectory(options.OutputDirectory);
+            if (!prepare.Succeeded) return prepare.ToResult<SiteBuildReport>();
 
-            var assembly = SiteAssembler.AssembleConfigured(options.EffectiveScanRoots, navMap, options.MetadataInference);
+            NavMap effectiveNavMap;
+            if (navMap is not null)
+            {
+                effectiveNavMap = navMap;
+            }
+            else
+            {
+                var scaffold = NavMapScaffolder.BuildInMemory(
+                    options.EffectiveScanRoots,
+                    options.MetadataInference ?? NoOpMetadataInference.Instance);
+                if (!scaffold.Succeeded) return scaffold.ToResult<SiteBuildReport>();
+                effectiveNavMap = scaffold.Value;
+            }
+
+            var assembly = SiteAssembler.AssembleConfigured(options.EffectiveScanRoots, effectiveNavMap, options.MetadataInference, sectionBehaviour);
             if (!assembly.Succeeded) return assembly.ToResult<SiteBuildReport>();
 
             var model = assembly.Value.Site;
@@ -135,7 +151,7 @@ public static class SiteBuilder
             if (File.Exists(mermaidSrc))
                 File.Copy(mermaidSrc, Path.Combine(options.OutputDirectory, "mermaid.min.js"), overwrite: true);
 
-            CopyNonMarkdownAssets(options.EffectiveScanRoots, options.OutputDirectory);
+            CopyNonMarkdownAssets(options.EffectiveScanRoots, options.OutputDirectory, assetExcludes ?? []);
 
             return new SiteBuildReport(options.OutputDirectory, assembly.Value.UnplacedDocuments);
         }
@@ -145,7 +161,58 @@ public static class SiteBuilder
         }
     }
 
-    static void CopyNonMarkdownAssets(IReadOnlyList<string> sourceRoots, string outputDir)
+    const string OutputMarkerFileName = ".sitebuilder";
+
+    static readonly string[] DefaultIgnoredDirectoryNames =
+        [".git", ".vs", ".vscode", ".idea", "bin", "obj", "node_modules"];
+
+    /// <summary>Ensures the output directory is safe to write into: creates it, accepts it if empty,
+    /// cleans it if it carries this tool's marker from a prior run, and refuses to touch unrecognised data.</summary>
+    static Result PrepareOutputDirectory(string outputDirectory)
+    {
+        try
+        {
+            if (!Directory.Exists(outputDirectory))
+            {
+                Directory.CreateDirectory(outputDirectory);
+                WriteOutputMarker(outputDirectory);
+                return Result.Success;
+            }
+
+            var entries = Directory.GetFileSystemEntries(outputDirectory);
+            if (entries.Length == 0)
+            {
+                WriteOutputMarker(outputDirectory);
+                return Result.Success;
+            }
+
+            var markerPath = Path.Combine(outputDirectory, OutputMarkerFileName);
+            if (!File.Exists(markerPath))
+            {
+                return Result.Fail(new InvalidOperationException(
+                    $"The output directory '{outputDirectory}' is not empty and was not produced by a prior SiteBuilder run " +
+                    $"(no '{OutputMarkerFileName}' marker found); refusing to delete unrecognised data."));
+            }
+
+            foreach (var entry in entries)
+            {
+                if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
+                else File.Delete(entry);
+            }
+
+            WriteOutputMarker(outputDirectory);
+            return Result.Success;
+        }
+        catch (Exception ex)
+        {
+            return Result.Fail(ex);
+        }
+    }
+
+    static void WriteOutputMarker(string outputDirectory) =>
+        File.WriteAllText(Path.Combine(outputDirectory, OutputMarkerFileName), string.Empty);
+
+    static void CopyNonMarkdownAssets(IReadOnlyList<string> sourceRoots, string outputDir, IReadOnlyList<string> additionalExcludes)
     {
         var copiedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -160,6 +227,10 @@ public static class SiteBuilder
                     continue;
 
                 var relativePath = Path.GetRelativePath(sourceRoot, sourcePath);
+
+                if (IsExcludedAsset(relativePath, additionalExcludes))
+                    continue;
+
                 if (!copiedPaths.Add(relativePath))
                     throw new InvalidOperationException(
                         $"The non-markdown asset '{relativePath}' appears in more than one scan root.");
@@ -177,5 +248,38 @@ public static class SiteBuilder
             return fullPath.StartsWith(fullDirectory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
                 || fullPath.Equals(fullDirectory, StringComparison.OrdinalIgnoreCase);
         }
+    }
+
+    static bool IsExcludedAsset(string relativePath, IReadOnlyList<string> additionalExcludes)
+    {
+        var segments = relativePath.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var segment in segments)
+        {
+            if (segment.StartsWith('.'))
+                return true;
+
+            if (DefaultIgnoredDirectoryNames.Contains(segment, StringComparer.OrdinalIgnoreCase))
+                return true;
+
+            foreach (var pattern in additionalExcludes)
+            {
+                if (MatchesGlob(segment, pattern))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    static bool MatchesGlob(string value, string pattern)
+    {
+        if (!pattern.Contains('*') && !pattern.Contains('?'))
+            return value.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+
+        var regexPattern = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+        return Regex.IsMatch(value, regexPattern, RegexOptions.IgnoreCase);
     }
 }

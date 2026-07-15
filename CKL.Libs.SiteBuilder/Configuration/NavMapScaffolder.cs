@@ -14,15 +14,30 @@ internal static class NavMapScaffolder
             if (File.Exists(navMapPath))
                 return Result.Success;
 
-            var assembly = SiteAssembler.AssembleConfigured(scanRoots, null, inference);
-            if (!assembly.Succeeded) return assembly.ToResult();
+            var scaffold = BuildInMemory(scanRoots, inference);
+            if (!scaffold.Succeeded) return scaffold.ToResult();
 
-            var scaffold = BuildScaffold(assembly.Value.Site.Pages);
-            return NavMapFile.Write(navMapPath, scaffold);
+            return NavMapFile.Write(navMapPath, scaffold.Value);
         }
         catch (Exception ex)
         {
             return Result.Fail(ex);
+        }
+    }
+
+    /// <summary>Builds a nav map from discovered pages without persisting it, for direct-options builds and internal scaffolding.</summary>
+    public static Result<NavMap> BuildInMemory(IReadOnlyList<string> scanRoots, IMetadataInference inference)
+    {
+        try
+        {
+            var discovered = SiteAssembler.DiscoverPagesForScaffold(scanRoots, inference);
+            if (!discovered.Succeeded) return discovered.ToResult<NavMap>();
+
+            return BuildScaffold(discovered.Value);
+        }
+        catch (Exception ex)
+        {
+            return Result<NavMap>.Fail(ex);
         }
     }
 
@@ -59,12 +74,8 @@ internal static class NavMapScaffolder
     static IReadOnlyList<NavMapEntry> BuildRootEntries(DirectoryNode root)
     {
         var entries = new List<NavMapEntry>();
-        var landing = FindLanding(root);
-        if (landing is not null)
-            entries.Add(new NavMapEntry(landing.Title, landing.RelativeSource, [], false));
 
         entries.AddRange(root.Files
-            .Where(file => !IsLandingFile(file.RelativeSource))
             .OrderBy(file => file.RelativeSource, StringComparer.OrdinalIgnoreCase)
             .Select(file => new NavMapEntry(file.Title, file.RelativeSource, [], false)));
 
@@ -81,17 +92,8 @@ internal static class NavMapScaffolder
     static NavMapEntry? BuildSection(DirectoryNode directory)
     {
         var children = new List<NavMapEntry>();
-        var landing = FindLanding(directory);
-        if (landing is not null)
-        {
-            var landingTitle = IsOriginBackedReadme(landing.SourcePath!)
-                ? "README"
-                : "Overview";
-            children.Add(new NavMapEntry(landingTitle, landing.RelativeSource, [], false));
-        }
 
         children.AddRange(directory.Files
-            .Where(file => !IsLandingFile(file.RelativeSource))
             .OrderBy(file => file.RelativeSource, StringComparer.OrdinalIgnoreCase)
             .Select(file => new NavMapEntry(file.Title, file.RelativeSource, [], false)));
 
@@ -106,19 +108,6 @@ internal static class NavMapScaffolder
             ? null
             : new NavMapEntry(SiteAssembler.FormatFolderName(directory.Name), null, children, false);
     }
-
-    static SiteNode? FindLanding(DirectoryNode directory) =>
-        directory.Files.FirstOrDefault(file => IsLandingFile(file.RelativeSource));
-
-    static bool IsLandingFile(string relativeSource)
-    {
-        var fileName = Path.GetFileName(relativeSource);
-        return fileName.Equals("README.md", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals("_index.md", StringComparison.OrdinalIgnoreCase);
-    }
-
-    static bool IsOriginBackedReadme(string sourcePath) =>
-        File.ReadLines(sourcePath).FirstOrDefault()?.StartsWith("[//]: # (origin:", StringComparison.Ordinal) == true;
 
     sealed class DirectoryNode(string name)
     {
