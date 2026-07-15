@@ -5,7 +5,7 @@ namespace CKL.Libs.SiteBuilder.Model;
 /// <see cref="Landing"/> are produced by the current assembler; <see cref="NodeIndex"/>
 /// and <see cref="Search"/> are declared for the model shape but not yet synthesised
 /// (they depend on the authoritative navigation map and search index, deferred to
-/// plan 0014).
+/// the config/CLI plan).
 /// </summary>
 internal enum SiteNodeKind
 {
@@ -27,8 +27,10 @@ internal enum SiteNodeKind
 /// source location (<c>null</c> for a future synthetic node with no backing source
 /// file). <see cref="RelativeOutput"/> doubles as the node's navigation position,
 /// combined with its place in the <see cref="SiteNavNode"/> tree. <see cref="Overrides"/>
-/// is empty for every node produced by this plan — it is populated later by the
-/// metadata-resolution pass / navigation map.
+/// carries the node's resolved metadata (R-13: <c>type</c>, <c>title</c>,
+/// <c>date</c>, <c>state</c>, <c>tags</c>, <c>summary</c>, <c>perspective</c>) —
+/// populated by <c>MetadataIndex</c> via <c>SiteAssembler</c>; empty for a document
+/// where no field resolved. The authoritative navigation map still lands separately.
 /// </summary>
 internal sealed record SiteNode(
     string? SourcePath,

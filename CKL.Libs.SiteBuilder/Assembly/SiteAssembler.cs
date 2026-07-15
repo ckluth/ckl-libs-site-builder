@@ -1,4 +1,5 @@
 using CKL.Libs.ResultPattern;
+using CKL.Libs.SiteBuilder.Metadata;
 using CKL.Libs.SiteBuilder.Model;
 
 namespace CKL.Libs.SiteBuilder.Assembly;
@@ -9,14 +10,21 @@ namespace CKL.Libs.SiteBuilder.Assembly;
 /// source renderer's discovery/nav logic (<c>SiteBuilder.cs</c> in
 /// site-builder-renderer): <c>DiscoverPages</c>, <c>BuildNav</c>, <c>BuildNavNode</c>,
 /// <c>ToOutputPath</c>, <c>FormatName</c>, <c>FormatFolderName</c>, <c>ExtractTitle</c>.
+/// Also resolves each node's metadata (R-13) via the in-memory
+/// <see cref="MetadataIndex"/> (R-08), populating <see cref="SiteNode.Overrides"/>
+/// without touching the node's rendered <see cref="SiteNode.Title"/> — so plan
+/// 0013's render output stays byte-unchanged.
 /// </summary>
 internal static class SiteAssembler
 {
-    public static Result<SiteModel> Assemble(string sourceDir)
+    public static Result<SiteModel> Assemble(string sourceDir, IMetadataInference? inference = null)
     {
         try
         {
-            var pages = DiscoverPages(sourceDir);
+            var metadataIndex = MetadataIndex.Build(sourceDir, inference ?? NoOpMetadataInference.Instance);
+            if (!metadataIndex.Succeeded) return metadataIndex.ToResult<SiteModel>();
+
+            var pages = DiscoverPages(sourceDir, metadataIndex.Value);
             var nav = BuildNav(pages, sourceDir);
             return new SiteModel(pages, nav);
         }
@@ -26,7 +34,7 @@ internal static class SiteAssembler
         }
     }
 
-    static List<SiteNode> DiscoverPages(string sourceDir) =>
+    static List<SiteNode> DiscoverPages(string sourceDir, MetadataIndex metadataIndex) =>
         Directory
             .GetFiles(sourceDir, "*.md", SearchOption.AllDirectories)
             .Select(sourcePath =>
@@ -38,10 +46,32 @@ internal static class SiteAssembler
                 var kind = Path.GetFileName(relativeOutput).Equals("index.html", StringComparison.OrdinalIgnoreCase)
                     ? SiteNodeKind.Landing
                     : SiteNodeKind.Document;
-                return new SiteNode(sourcePath, rel, relativeOutput, title, kind, SiteNode.NoOverrides);
+                var overrides = ToOverrides(metadataIndex.Get(rel));
+                return new SiteNode(sourcePath, rel, relativeOutput, title, kind, overrides);
             })
             .OrderBy(p => p.RelativeSource)
             .ToList();
+
+    static IReadOnlyDictionary<string, string> ToOverrides(DocumentMetadata? metadata)
+    {
+        if (metadata is null) return SiteNode.NoOverrides;
+
+        var overrides = new Dictionary<string, string>();
+        void AddIfPresent(string key, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value)) overrides[key] = value;
+        }
+
+        AddIfPresent("type", metadata.Type);
+        AddIfPresent("title", metadata.Title);
+        AddIfPresent("date", metadata.Date);
+        AddIfPresent("state", metadata.State);
+        if (metadata.Tags is { Count: > 0 }) overrides["tags"] = string.Join(", ", metadata.Tags);
+        AddIfPresent("summary", metadata.Summary);
+        AddIfPresent("perspective", metadata.Perspective);
+
+        return overrides;
+    }
 
     internal static string ToOutputPath(string relativeSourcePath)
     {
