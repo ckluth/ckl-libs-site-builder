@@ -1,32 +1,88 @@
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using CKL.Libs.ResultPattern;
+using CKL.Libs.SiteBuilder.Configuration;
 using CKL.Libs.SiteBuilder.Metadata;
 using CKL.Libs.SiteBuilder.Model;
 
 namespace CKL.Libs.SiteBuilder.Assembly;
 
-/// <summary>
-/// Produces a <see cref="SiteModel"/> in memory from a scan root — no staging folder
-/// is ever written to disk (ADR 0019 §2). Ported behaviour-for-behaviour from the
-/// source renderer's discovery/nav logic (<c>SiteBuilder.cs</c> in
-/// site-builder-renderer): <c>DiscoverPages</c>, <c>BuildNav</c>, <c>BuildNavNode</c>,
-/// <c>ToOutputPath</c>, <c>FormatName</c>, <c>FormatFolderName</c>, <c>ExtractTitle</c>.
-/// Also resolves each node's metadata (R-13) via the in-memory
-/// <see cref="MetadataIndex"/> (R-08), populating <see cref="SiteNode.Overrides"/>
-/// without touching the node's rendered <see cref="SiteNode.Title"/> — so plan
-/// 0013's render output stays byte-unchanged.
-/// </summary>
+internal sealed record SiteAssemblyResult(SiteModel Site, IReadOnlyList<string> UnplacedDocuments);
+
 internal static class SiteAssembler
 {
     public static Result<SiteModel> Assemble(string sourceDir, IMetadataInference? inference = null)
     {
+        var result = AssembleConfigured([sourceDir], null, inference);
+        if (!result.Succeeded) return result.ToResult<SiteModel>();
+        return result.Value.Site;
+    }
+
+    public static Result<SiteAssemblyResult> AssembleConfigured(
+        IReadOnlyList<string> scanRoots,
+        NavMap? navMap,
+        IMetadataInference? inference = null)
+    {
         try
         {
-            var metadataIndex = MetadataIndex.Build(sourceDir, inference ?? NoOpMetadataInference.Instance);
-            if (!metadataIndex.Succeeded) return metadataIndex.ToResult<SiteModel>();
+            var metadataIndex = MetadataIndex.Build(scanRoots, inference ?? NoOpMetadataInference.Instance);
+            if (!metadataIndex.Succeeded) return metadataIndex.ToResult<SiteAssemblyResult>();
 
-            var pages = DiscoverPages(sourceDir, metadataIndex.Value);
-            var nav = BuildNav(pages, sourceDir);
-            return new SiteModel(pages, nav);
+            var discovered = DiscoverPages(scanRoots, metadataIndex.Value);
+
+            if (navMap is null)
+            {
+                var legacyPages = discovered
+                    .Select(page => page.ToLegacySiteNode())
+                    .OrderBy(page => page.RelativeSource, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                var legacyNav = BuildNav(legacyPages);
+                return new SiteAssemblyResult(new SiteModel(legacyPages, legacyNav), []);
+            }
+
+            var drift = DriftDetector.Detect(discovered.Select(page => page.RelativeSource), navMap);
+            var mapped = AssembleFromNavMap(discovered, metadataIndex.Value, navMap);
+            if (!mapped.Succeeded) return mapped.ToResult<SiteAssemblyResult>();
+
+            return new SiteAssemblyResult(mapped.Value, drift);
+        }
+        catch (Exception ex)
+        {
+            return Result<SiteAssemblyResult>.Fail(ex);
+        }
+    }
+
+    static Result<SiteModel> AssembleFromNavMap(
+        IReadOnlyList<DiscoveredPage> discovered,
+        MetadataIndex metadataIndex,
+        NavMap navMap)
+    {
+        try
+        {
+            var bySource = discovered.ToDictionary(page => page.RelativeSource, StringComparer.OrdinalIgnoreCase);
+            var pages = new List<SiteNode>();
+            var navNodes = new List<SiteNavNode>();
+            var placedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var usedOutputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            AppendMappedEntries(
+                navMap.Entries,
+                currentDirectory: "",
+                pages,
+                navNodes,
+                bySource,
+                placedSources,
+                usedOutputs);
+
+            var searchPage = BuildSearchNode(metadataIndex, pages, usedOutputs);
+            pages.Add(searchPage);
+            navNodes.Add(new SiteNavNode("Search", new SiteNavPage("Search", searchPage.RelativeOutput), []));
+
+            return new SiteModel(
+                pages.OrderBy(page => page.RelativeOutput, StringComparer.OrdinalIgnoreCase).ToArray(),
+                navNodes);
         }
         catch (Exception ex)
         {
@@ -34,29 +90,230 @@ internal static class SiteAssembler
         }
     }
 
-    static List<SiteNode> DiscoverPages(string sourceDir, MetadataIndex metadataIndex) =>
-        Directory
-            .GetFiles(sourceDir, "*.md", SearchOption.AllDirectories)
-            .Select(sourcePath =>
+    static void AppendMappedEntries(
+        IReadOnlyList<NavMapEntry> entries,
+        string currentDirectory,
+        List<SiteNode> pages,
+        List<SiteNavNode> navNodes,
+        IReadOnlyDictionary<string, DiscoveredPage> bySource,
+        ISet<string> placedSources,
+        ISet<string> usedOutputs)
+    {
+        var reservedSlugs = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var entry in entries)
+        {
+            var slug = ReserveSlug(reservedSlugs, Slugify(entry.Title));
+
+            if (entry.Skip)
             {
-                var rel = Path.GetRelativePath(sourceDir, sourcePath);
-                var relativeOutput = ToOutputPath(rel);
-                var title = ExtractTitle(sourcePath)
-                    ?? FormatName(Path.GetFileNameWithoutExtension(rel));
-                var kind = Path.GetFileName(relativeOutput).Equals("index.html", StringComparison.OrdinalIgnoreCase)
+                MarkPlaced(entry, placedSources, bySource);
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(entry.Source))
+            {
+                if (!bySource.TryGetValue(entry.Source!, out var discovered))
+                    throw new InvalidOperationException($"The nav map references '{entry.Source}', but no such source document was discovered.");
+
+                if (!placedSources.Add(entry.Source!))
+                    throw new InvalidOperationException($"The nav map places '{entry.Source}' more than once.");
+
+                var relativeOutput = IsRootHomeEntry(currentDirectory, entry)
+                    ? "index.html"
+                    : CombineOutput(currentDirectory, slug + ".html");
+                EnsureOutputAvailable(relativeOutput, usedOutputs);
+
+                var kind = relativeOutput.Equals("index.html", StringComparison.OrdinalIgnoreCase)
                     ? SiteNodeKind.Landing
                     : SiteNodeKind.Document;
-                var overrides = ToOverrides(metadataIndex.Get(rel));
-                return new SiteNode(sourcePath, rel, relativeOutput, title, kind, overrides);
+
+                var node = discovered.ToMappedSiteNode(entry.Title, relativeOutput, kind);
+                pages.Add(node);
+                navNodes.Add(new SiteNavNode(entry.Title, new SiteNavPage(entry.Title, relativeOutput), []));
+                continue;
+            }
+
+            var sectionDirectory = CombineOutput(currentDirectory, slug);
+            var childNavNodes = new List<SiteNavNode>();
+
+            AppendMappedEntries(
+                entry.Children,
+                sectionDirectory,
+                pages,
+                childNavNodes,
+                bySource,
+                placedSources,
+                usedOutputs);
+
+            var sectionOutput = Path.Combine(sectionDirectory, "index.html");
+            EnsureOutputAvailable(sectionOutput, usedOutputs);
+
+            var generatedHtml = BuildNodeIndexHtml(entry.Title, sectionOutput, childNavNodes);
+            pages.Add(new SiteNode(
+                SourcePath: null,
+                RelativeSource: "",
+                RelativeOutput: sectionOutput,
+                Title: entry.Title,
+                Kind: SiteNodeKind.NodeIndex,
+                Overrides: SiteNode.NoOverrides,
+                GeneratedHtml: generatedHtml));
+
+            navNodes.Add(new SiteNavNode(
+                entry.Title,
+                new SiteNavPage("Overview", sectionOutput),
+                childNavNodes));
+        }
+    }
+
+    static void MarkPlaced(
+        NavMapEntry entry,
+        ISet<string> placedSources,
+        IReadOnlyDictionary<string, DiscoveredPage> bySource)
+    {
+        if (!string.IsNullOrWhiteSpace(entry.Source))
+        {
+            if (!bySource.ContainsKey(entry.Source!))
+                throw new InvalidOperationException($"The nav map references '{entry.Source}', but no such source document was discovered.");
+
+            if (!placedSources.Add(entry.Source!))
+                throw new InvalidOperationException($"The nav map places '{entry.Source}' more than once.");
+        }
+
+        foreach (var child in entry.Children)
+            MarkPlaced(child, placedSources, bySource);
+    }
+
+    static SiteNode BuildSearchNode(
+        MetadataIndex metadataIndex,
+        IReadOnlyList<SiteNode> placedPages,
+        ISet<string> usedOutputs)
+    {
+        var relativeOutput = Path.Combine("search", "index.html");
+        EnsureOutputAvailable(relativeOutput, usedOutputs);
+
+        var searchItems = placedPages
+            .Where(page => page.SourcePath is not null)
+            .Select(page =>
+            {
+                var metadata = metadataIndex.Get(page.RelativeSource);
+                return new SearchItem(
+                    metadata?.Type,
+                    metadata?.Title ?? page.Title,
+                    metadata?.Tags?.ToArray() ?? [],
+                    metadata?.Summary,
+                    page.RelativeOutput.Replace('\\', '/'));
             })
-            .OrderBy(p => p.RelativeSource)
-            .ToList();
+            .OrderBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var json = JsonSerializer.Serialize(
+                searchItems,
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })
+            .Replace("</", "<\\/");
+        var html = $$"""
+            <h1>Search</h1>
+            <p>Filter the placed documents by title, type, tags, or summary.</p>
+            <input id="search-query" type="search" placeholder="Search..." style="width:100%;padding:0.7em;margin:1em 0;">
+            <ul id="search-results"></ul>
+            <script type="application/json" id="search-data">{{json}}</script>
+            <script>
+            (function () {
+              var data = JSON.parse(document.getElementById('search-data').textContent || '[]');
+              var query = document.getElementById('search-query');
+              var results = document.getElementById('search-results');
+              function render(items) {
+                results.innerHTML = items.map(function (item) {
+                  var tags = item.tags && item.tags.length ? ' <small>(' + item.tags.join(', ') + ')</small>' : '';
+                  var type = item.type ? '<div><strong>' + item.type + '</strong></div>' : '';
+                  var summary = item.summary ? '<div>' + item.summary + '</div>' : '';
+                  return '<li style="margin:0.75em 0;"><a href="' + item.url + '">' + item.title + '</a>' + tags + type + summary + '</li>';
+                }).join('');
+              }
+              function filter() {
+                var term = (query.value || '').toLowerCase();
+                if (!term) { render(data); return; }
+                render(data.filter(function (item) {
+                  var haystack = [item.title, item.type, item.summary, (item.tags || []).join(' ')].join(' ').toLowerCase();
+                  return haystack.indexOf(term) >= 0;
+                }));
+              }
+              query.addEventListener('input', filter);
+              render(data);
+            }());
+            </script>
+            """;
+
+        return new SiteNode(
+            SourcePath: null,
+            RelativeSource: "",
+            RelativeOutput: relativeOutput,
+            Title: "Search",
+            Kind: SiteNodeKind.Search,
+            Overrides: SiteNode.NoOverrides,
+            GeneratedHtml: html);
+    }
+
+    static string BuildNodeIndexHtml(string sectionTitle, string currentOutput, IReadOnlyList<SiteNavNode> children)
+    {
+        var sb = new StringBuilder();
+        sb.Append("<h1>").Append(System.Net.WebUtility.HtmlEncode(sectionTitle)).AppendLine("</h1>");
+        sb.AppendLine("<ul>");
+
+        foreach (var child in children)
+        {
+            var target = child.Page?.RelativeOutput;
+            if (target is null) continue;
+
+            sb.Append("  <li><a href=\"")
+                .Append(System.Net.WebUtility.HtmlEncode(ComputeRelativeHrefForGeneratedPage(currentOutput, target)))
+                .Append("\">")
+                .Append(System.Net.WebUtility.HtmlEncode(child.Title))
+                .AppendLine("</a></li>");
+        }
+
+        sb.AppendLine("</ul>");
+        return sb.ToString();
+    }
+
+    static IReadOnlyList<DiscoveredPage> DiscoverPages(IReadOnlyList<string> scanRoots, MetadataIndex metadataIndex)
+    {
+        var discovered = new List<DiscoveredPage>();
+        var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var scanRoot in scanRoots)
+        {
+            foreach (var sourcePath in Directory.GetFiles(scanRoot, "*.md", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+            {
+                var relativeSource = Path.GetRelativePath(scanRoot, sourcePath);
+                if (!seenSources.Add(relativeSource))
+                    throw new InvalidOperationException($"The relative source path '{relativeSource}' appears in more than one scan root.");
+
+                var title = ExtractTitle(sourcePath)
+                    ?? FormatName(Path.GetFileNameWithoutExtension(relativeSource));
+                var kind = ToOutputPath(relativeSource).EndsWith("index.html", StringComparison.OrdinalIgnoreCase)
+                    ? SiteNodeKind.Landing
+                    : SiteNodeKind.Document;
+
+                discovered.Add(new DiscoveredPage(
+                    scanRoot,
+                    sourcePath,
+                    relativeSource,
+                    title,
+                    kind,
+                    ToOverrides(metadataIndex.Get(relativeSource))));
+            }
+        }
+
+        return discovered;
+    }
 
     static IReadOnlyDictionary<string, string> ToOverrides(DocumentMetadata? metadata)
     {
         if (metadata is null) return SiteNode.NoOverrides;
 
-        var overrides = new Dictionary<string, string>();
+        var overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         void AddIfPresent(string key, string? value)
         {
             if (!string.IsNullOrWhiteSpace(value)) overrides[key] = value;
@@ -86,56 +343,70 @@ internal static class SiteAssembler
         return dir.Length > 0 ? Path.Combine(dir, outputFileName) : outputFileName;
     }
 
-    internal static List<SiteNavNode> BuildNav(List<SiteNode> pages, string sourceDir)
+    internal static List<SiteNavNode> BuildNav(List<SiteNode> pages)
     {
         var nodes = new List<SiteNavNode>();
 
-        var homePage = pages.FirstOrDefault(p =>
-            p.RelativeOutput.Equals("index.html", StringComparison.OrdinalIgnoreCase));
+        var homePage = pages.FirstOrDefault(page =>
+            page.RelativeOutput.Equals("index.html", StringComparison.OrdinalIgnoreCase));
         if (homePage is not null)
-        {
-            var homeTitle = ExtractTitle(homePage.SourcePath!) ?? "Home";
-            nodes.Add(new SiteNavNode("", homeTitle, new SiteNavPage(homeTitle, "index.html"), []));
-        }
+            nodes.Add(new SiteNavNode(homePage.Title, new SiteNavPage(homePage.Title, "index.html"), []));
 
-        foreach (var dir in Directory.GetDirectories(sourceDir).OrderBy(d => d))
+        foreach (var directory in GetTopLevelDirectories(pages))
         {
-            var folderName = Path.GetFileName(dir)!;
-            var node = BuildNavNode(folderName, pages, sourceDir, depth: 1, maxDepth: 2);
+            var node = BuildNavNode(directory, pages, depth: 1, maxDepth: 2);
             if (node is not null) nodes.Add(node);
         }
 
         return nodes;
     }
 
-    static SiteNavNode? BuildNavNode(string relativePath, List<SiteNode> pages, string sourceDir, int depth, int maxDepth)
+    static IEnumerable<string> GetTopLevelDirectories(IEnumerable<SiteNode> pages) =>
+        pages.Select(page => page.RelativeOutput.Replace('\\', '/'))
+            .Where(path => path.Contains('/'))
+            .Select(path => path.Split('/')[0])
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
+
+    static SiteNavNode? BuildNavNode(string relativePath, List<SiteNode> pages, int depth, int maxDepth)
     {
         var relNorm = relativePath.Replace('\\', '/');
         var indexOutput = relNorm + "/index.html";
 
-        var landing = pages.FirstOrDefault(p =>
-            p.RelativeOutput.Replace('\\', '/').Equals(indexOutput, StringComparison.OrdinalIgnoreCase));
+        var landing = pages.FirstOrDefault(page =>
+            page.RelativeOutput.Replace('\\', '/').Equals(indexOutput, StringComparison.OrdinalIgnoreCase));
 
         if (landing is null) return null;
 
         var title = FormatFolderName(Path.GetFileName(relativePath));
         var landingLabel = File.ReadLines(landing.SourcePath!).FirstOrDefault()
-            ?.StartsWith("[//]: # (origin:") == true ? "README" : "Overview";
+            ?.StartsWith("[//]: # (origin:", StringComparison.Ordinal) == true ? "README" : "Overview";
         var landingNav = new SiteNavPage(landingLabel, landing.RelativeOutput);
 
         var children = new List<SiteNavNode>();
         if (depth < maxDepth)
         {
-            var fullPath = Path.Combine(sourceDir, relativePath);
-            foreach (var subDir in Directory.GetDirectories(fullPath).OrderBy(d => d))
+            foreach (var subDirectory in GetDirectChildDirectories(relativePath, pages))
             {
-                var subRel = Path.Combine(relativePath, Path.GetFileName(subDir)!);
-                var child = BuildNavNode(subRel, pages, sourceDir, depth + 1, maxDepth);
+                var child = BuildNavNode(subDirectory, pages, depth + 1, maxDepth);
                 if (child is not null) children.Add(child);
             }
         }
 
-        return new SiteNavNode(relativePath, title, landingNav, children);
+        return new SiteNavNode(title, landingNav, children);
+    }
+
+    static IEnumerable<string> GetDirectChildDirectories(string parentRelativePath, IEnumerable<SiteNode> pages)
+    {
+        var prefix = parentRelativePath.Replace('\\', '/') + "/";
+
+        return pages.Select(page => page.RelativeOutput.Replace('\\', '/'))
+            .Where(path => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            .Select(path => path[prefix.Length..])
+            .Where(path => path.Contains('/'))
+            .Select(path => Path.Combine(parentRelativePath, path.Split('/')[0]))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
     }
 
     internal static string? ExtractTitle(string sourcePath)
@@ -148,19 +419,84 @@ internal static class SiteAssembler
             if (trimmed.Length > 0 && !trimmed.StartsWith('#'))
                 break;
         }
+
         return null;
     }
 
     internal static string FormatFolderName(string folderName)
     {
-        var withoutNumber = System.Text.RegularExpressions.Regex.Replace(folderName, @"^\d+[-_]?", "");
+        var withoutNumber = Regex.Replace(folderName, @"^\d+[-_]?", "");
         return FormatName(withoutNumber);
     }
 
     internal static string FormatName(string name)
     {
         var words = name.Replace('-', ' ').Replace('_', ' ')
-                        .Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        return string.Join(" ", words.Select(w => char.ToUpper(w[0]) + w[1..]));
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return string.Join(" ", words.Select(word => char.ToUpper(word[0]) + word[1..]));
     }
+
+    static bool IsRootHomeEntry(string currentDirectory, NavMapEntry entry) =>
+        currentDirectory.Length == 0
+        && (string.Equals(entry.Source, "README.md", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(entry.Source, "_index.md", StringComparison.OrdinalIgnoreCase));
+
+    static string Slugify(string value)
+    {
+        var normalized = Regex.Replace(value.Trim().ToLowerInvariant(), @"[^a-z0-9]+", "-").Trim('-');
+        return normalized.Length == 0 ? "section" : normalized;
+    }
+
+    static string ReserveSlug(IDictionary<string, int> reserved, string slug)
+    {
+        if (!reserved.TryGetValue(slug, out var count))
+        {
+            reserved[slug] = 1;
+            return slug;
+        }
+
+        count++;
+        reserved[slug] = count;
+        return $"{slug}-{count}";
+    }
+
+    static string CombineOutput(string currentDirectory, string name) =>
+        currentDirectory.Length == 0 ? name : Path.Combine(currentDirectory, name);
+
+    static void EnsureOutputAvailable(string relativeOutput, ISet<string> usedOutputs)
+    {
+        if (!usedOutputs.Add(relativeOutput))
+            throw new InvalidOperationException($"The output path '{relativeOutput}' is assigned more than once.");
+    }
+
+    static string ComputeRelativeHrefForGeneratedPage(string fromOutput, string toOutput)
+    {
+        const string root = "C:\\__site__";
+        var fromDir = Path.GetDirectoryName(fromOutput) ?? "";
+        var absFrom = fromDir.Length > 0 ? Path.Combine(root, fromDir) : root;
+        var absTo = Path.Combine(root, toOutput);
+        return Path.GetRelativePath(absFrom, absTo).Replace('\\', '/');
+    }
+
+    sealed record DiscoveredPage(
+        string SourceRoot,
+        string SourcePath,
+        string RelativeSource,
+        string Title,
+        SiteNodeKind Kind,
+        IReadOnlyDictionary<string, string> Overrides)
+    {
+        public SiteNode ToLegacySiteNode() =>
+            new(SourcePath, RelativeSource, ToOutputPath(RelativeSource), Title, Kind, Overrides, SourceRoot);
+
+        public SiteNode ToMappedSiteNode(string title, string relativeOutput, SiteNodeKind kind) =>
+            new(SourcePath, RelativeSource, relativeOutput, title, kind, Overrides, SourceRoot);
+    }
+
+    sealed record SearchItem(
+        string? Type,
+        string Title,
+        IReadOnlyList<string> Tags,
+        string? Summary,
+        string Url);
 }

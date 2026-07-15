@@ -2,12 +2,6 @@ using CKL.Libs.ResultPattern;
 
 namespace CKL.Libs.SiteBuilder.Metadata;
 
-/// <summary>
-/// The in-memory metadata index (R-08's in-memory half; R-13): resolves every
-/// discovered markdown document under a scan root into its
-/// <see cref="DocumentMetadata"/>, built fresh on every call and never written to
-/// disk — no <c>docs-index.json</c>, no persisted store of any kind.
-/// </summary>
 internal sealed class MetadataIndex
 {
     readonly IReadOnlyDictionary<string, DocumentMetadata> _byRelativeSource;
@@ -21,36 +15,44 @@ internal sealed class MetadataIndex
         _defectsByRelativeSource = defectsByRelativeSource;
     }
 
-    /// <summary>The resolved metadata for a document, keyed by its path relative to the scan root.</summary>
+    public IReadOnlyDictionary<string, DocumentMetadata> Entries => _byRelativeSource;
+
     public DocumentMetadata? Get(string relativeSourcePath) =>
         _byRelativeSource.TryGetValue(relativeSourcePath, out var metadata) ? metadata : null;
 
-    /// <summary>Any defects surfaced while resolving a document (e.g. frontmatter contradicting structure).</summary>
     public IReadOnlyList<string> DefectsFor(string relativeSourcePath) =>
         _defectsByRelativeSource.TryGetValue(relativeSourcePath, out var defects) ? defects : [];
 
-    /// <summary>
-    /// Builds the index by resolving every <c>*.md</c> file under <paramref name="sourceDir"/>.
-    /// Recomputed fresh on every call (ADR 0018 Knob B) — never cached or persisted.
-    /// </summary>
-    public static Result<MetadataIndex> Build(string sourceDir, IMetadataInference inference)
+    public static Result<MetadataIndex> Build(string sourceDir, IMetadataInference inference) =>
+        Build([sourceDir], inference);
+
+    public static Result<MetadataIndex> Build(IReadOnlyList<string> sourceDirs, IMetadataInference inference)
     {
         try
         {
-            var byRelativeSource = new Dictionary<string, DocumentMetadata>();
-            var defectsByRelativeSource = new Dictionary<string, IReadOnlyList<string>>();
+            var byRelativeSource = new Dictionary<string, DocumentMetadata>(StringComparer.OrdinalIgnoreCase);
+            var defectsByRelativeSource = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var sourcePath in Directory.GetFiles(sourceDir, "*.md", SearchOption.AllDirectories))
+            foreach (var sourceDir in sourceDirs)
             {
-                var relativeSourcePath = Path.GetRelativePath(sourceDir, sourcePath);
-                var content = File.ReadAllText(sourcePath);
+                foreach (var sourcePath in Directory.GetFiles(sourceDir, "*.md", SearchOption.AllDirectories))
+                {
+                    var relativeSourcePath = Path.GetRelativePath(sourceDir, sourcePath);
+                    if (byRelativeSource.ContainsKey(relativeSourcePath))
+                    {
+                        throw new InvalidOperationException(
+                            $"The relative source path '{relativeSourcePath}' appears in more than one scan root.");
+                    }
 
-                var resolved = MetadataResolver.Resolve(relativeSourcePath, content, inference);
-                if (!resolved.Succeeded) return resolved.ToResult<MetadataIndex>();
+                    var content = File.ReadAllText(sourcePath);
 
-                byRelativeSource[relativeSourcePath] = resolved.Value.Metadata;
-                if (resolved.Value.Defects.Count > 0)
-                    defectsByRelativeSource[relativeSourcePath] = resolved.Value.Defects;
+                    var resolved = MetadataResolver.Resolve(relativeSourcePath, content, inference);
+                    if (!resolved.Succeeded) return resolved.ToResult<MetadataIndex>();
+
+                    byRelativeSource[relativeSourcePath] = resolved.Value.Metadata;
+                    if (resolved.Value.Defects.Count > 0)
+                        defectsByRelativeSource[relativeSourcePath] = resolved.Value.Defects;
+                }
             }
 
             return new MetadataIndex(byRelativeSource, defectsByRelativeSource);

@@ -46,16 +46,14 @@ CKL.Apps.SiteBuilder CLI) can drive it end to end.
 
 ## Status
 
-The renderer, in-memory assembler, and metadata-resolution pass are now real:
-the Markdig pipeline, offline Mermaid rendering, folder-derived `<details>`
-navigation, `.md`→`.html` link rewriting, non-markdown asset copying (R-02 …
-R-07), and the metadata-resolution pass — structural extraction → frontmatter
-overlay → an injectable AI-inference seam (default no-op) → an in-memory index
-(R-08's in-memory half, R-13) — are implemented, exposed through the public
-`SiteBuilder`/`SiteBuilderOptions` facade. Navigation is currently derived from
-source folder structure; the YAML configuration, the authoritative navigation
-map, the scaffold generator, drift detection, and the theme/Mermaid seams are
-still pending.
+The renderer, in-memory assembler, and metadata-resolution pass are real, and
+the library is now fully config-driven. The Markdig pipeline, offline Mermaid
+rendering, `.md`→`.html` link rewriting, non-markdown asset copying, the
+metadata-resolution precedence pass, YAML config parsing, authoritative nav-map
+assembly, first-run nav-map scaffolding, drift reporting for unplaced
+documents, the replaceable stylesheet seam, the configurable Mermaid theme
+seam, and synthetic section-index and search pages are all implemented and
+exposed through the public `SiteBuilder` / `SiteBuilderOptions` facade.
 
 ## Provenance
 

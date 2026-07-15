@@ -1,10 +1,10 @@
+using CKL.Libs.SiteBuilder.Assembly;
+using CKL.Libs.SiteBuilder.Model;
 using Markdig;
 using Markdig.Renderers;
 using Markdig.Renderers.Html;
 using Markdig.Syntax;
 using Markdig.Syntax.Inlines;
-using CKL.Libs.SiteBuilder.Assembly;
-using CKL.Libs.SiteBuilder.Model;
 
 namespace CKL.Libs.SiteBuilder.Rendering;
 
@@ -19,9 +19,30 @@ internal static class PageRenderer
         IReadOnlyList<SiteNavNode> navNodes,
         string sourceDir,
         string siteTitle,
-        bool showOrigin = true)
+        bool showOrigin = true,
+        string mermaidTheme = "dark",
+        IReadOnlyDictionary<string, string>? outputMap = null)
     {
-        var markdown = File.ReadAllText(page.SourcePath!);
+        var navHtml = BuildNavHtml(page, navNodes);
+        var depth = page.RelativeOutput
+            .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]).Length - 1;
+        var prefix = depth > 0 ? string.Concat(Enumerable.Repeat("../", depth)) : "";
+        var cssPath = prefix + "site.css";
+        var mermaidJsPath = prefix + "mermaid.min.js";
+
+        if (page.SourcePath is null)
+        {
+            return HtmlTemplate.Render(
+                page.Title,
+                siteTitle,
+                cssPath,
+                mermaidJsPath,
+                mermaidTheme,
+                navHtml,
+                page.GeneratedHtml ?? "");
+        }
+
+        var markdown = File.ReadAllText(page.SourcePath);
         var originHtml = "";
 
         if (showOrigin)
@@ -31,16 +52,15 @@ internal static class PageRenderer
             {
                 markdown = stripped;
                 var slash = origin.IndexOf('/');
-                var repo  = slash > 0 ? origin[..slash] : origin;
-                var rest  = slash > 0 ? origin[(slash + 1)..] : "";
+                var repo = slash > 0 ? origin[..slash] : origin;
+                var rest = slash > 0 ? origin[(slash + 1)..] : "";
                 var label = rest.Length > 0 ? $"[{repo}]/{rest}" : $"[{repo}]";
                 originHtml = $"<div class=\"origin\">{Encode(label)}</div>";
             }
         }
 
         var document = Markdown.Parse(markdown, Pipeline);
-
-        RewriteLinks(document, page, sourceDir);
+        RewriteLinks(document, page, sourceDir, outputMap);
 
         var title = ExtractTitle(document)
             ?? SiteAssembler.FormatName(Path.GetFileNameWithoutExtension(page.RelativeSource));
@@ -61,19 +81,16 @@ internal static class PageRenderer
         renderer.Render(document);
         var contentHtml = writer.ToString();
 
-        var navHtml = BuildNavHtml(page, navNodes);
-
-        var depth = page.RelativeOutput
-            .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]).Length - 1;
-        var prefix = depth > 0 ? string.Concat(Enumerable.Repeat("../", depth)) : "";
-        var cssPath      = prefix + "site.css";
-        var mermaidJsPath = prefix + "mermaid.min.js";
-
-        return HtmlTemplate.Render(title, siteTitle, cssPath, mermaidJsPath, navHtml, originHtml + contentHtml);
+        return HtmlTemplate.Render(
+            title,
+            siteTitle,
+            cssPath,
+            mermaidJsPath,
+            mermaidTheme,
+            navHtml,
+            originHtml + contentHtml);
     }
 
-    // Reads the origin comment written by the assembler: [//]: # (origin: repo/path)
-    // Returns (origin, markdownWithoutComment) or (null, original) if not present.
     static (string? origin, string markdown) ExtractOrigin(string markdown)
     {
         const string prefix = "[//]: # (origin: ";
@@ -82,16 +99,24 @@ internal static class PageRenderer
         if (firstLine.StartsWith(prefix) && firstLine.EndsWith(suffix))
         {
             var origin = firstLine[prefix.Length..^suffix.Length];
-            var rest   = markdown.Length > firstLine.Length + 1
+            var rest = markdown.Length > firstLine.Length + 1
                 ? markdown[(firstLine.Length + 1)..]
                 : "";
             return (origin, rest);
         }
+
         return (null, markdown);
     }
 
-    static void RewriteLinks(MarkdownDocument document, SiteNode currentPage, string sourceDir)
+    static void RewriteLinks(
+        MarkdownDocument document,
+        SiteNode currentPage,
+        string sourceDir,
+        IReadOnlyDictionary<string, string>? outputMap)
     {
+        var currentSourceRoot = string.IsNullOrWhiteSpace(currentPage.SourceRoot)
+            ? sourceDir
+            : currentPage.SourceRoot;
         var currentSourceDir = Path.GetDirectoryName(currentPage.RelativeSource) ?? "";
         var currentOutputDir = Path.GetDirectoryName(currentPage.RelativeOutput) ?? "";
 
@@ -103,39 +128,49 @@ internal static class PageRenderer
             var pathPart = fragmentIdx >= 0 ? link.Url[..fragmentIdx] : link.Url;
             var fragment = fragmentIdx >= 0 ? link.Url[fragmentIdx..] : "";
 
-            // Directory-style links → rewrite to index.html in that directory
             if (pathPart.EndsWith('/'))
             {
-                var resolvedDir = Path.GetFullPath(Path.Combine(sourceDir, currentSourceDir, pathPart));
-                var indexMdPath  = Path.Combine(resolvedDir, "_index.md");
-                var readmePath   = Path.Combine(resolvedDir, "README.md");
+                var resolvedDir = Path.GetFullPath(Path.Combine(currentSourceRoot, currentSourceDir, pathPart));
+                var indexMdPath = Path.Combine(resolvedDir, "_index.md");
+                var readmePath = Path.Combine(resolvedDir, "README.md");
                 var candidatePath = File.Exists(indexMdPath) ? indexMdPath
-                                  : File.Exists(readmePath)  ? readmePath
-                                  : null;
-                if (candidatePath is not null)
-                {
-                    var relSource = Path.GetRelativePath(sourceDir, candidatePath);
-                    if (!relSource.StartsWith(".."))
-                    {
-                        var targetOutput = SiteAssembler.ToOutputPath(relSource);
-                        link.Url = ComputeRelativeHref(currentOutputDir, targetOutput) + fragment;
-                    }
-                }
+                    : File.Exists(readmePath) ? readmePath
+                    : null;
+                if (candidatePath is null) continue;
+
+                var relSource = Path.GetRelativePath(currentSourceRoot, candidatePath);
+                if (relSource.StartsWith("..")) continue;
+
+                var targetOutput = ResolveOutputPath(relSource, outputMap);
+                if (targetOutput is null) continue;
+
+                link.Url = ComputeRelativeHref(currentOutputDir, targetOutput) + fragment;
                 continue;
             }
 
             if (!pathPart.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            var resolvedSourcePath = Path.GetFullPath(Path.Combine(sourceDir, currentSourceDir, pathPart));
-            var resolvedRelativeSource = Path.GetRelativePath(sourceDir, resolvedSourcePath);
+            var resolvedSourcePath = Path.GetFullPath(Path.Combine(currentSourceRoot, currentSourceDir, pathPart));
+            var resolvedRelativeSource = Path.GetRelativePath(currentSourceRoot, resolvedSourcePath);
 
             if (resolvedRelativeSource.StartsWith(".."))
-                continue; // outside source tree, leave as-is
+                continue;
 
-            var targetRelativeOutput = SiteAssembler.ToOutputPath(resolvedRelativeSource);
+            var targetRelativeOutput = ResolveOutputPath(resolvedRelativeSource, outputMap);
+            if (targetRelativeOutput is null) continue;
             link.Url = ComputeRelativeHref(currentOutputDir, targetRelativeOutput) + fragment;
         }
+    }
+
+    static string? ResolveOutputPath(string relativeSourcePath, IReadOnlyDictionary<string, string>? outputMap)
+    {
+        if (outputMap is null)
+            return SiteAssembler.ToOutputPath(relativeSourcePath);
+
+        return outputMap.TryGetValue(relativeSourcePath, out var targetOutput)
+            ? targetOutput
+            : null;
     }
 
     static string? ExtractTitle(MarkdownDocument document)
@@ -157,19 +192,7 @@ internal static class PageRenderer
         var currentOutputDir = (Path.GetDirectoryName(currentPage.RelativeOutput) ?? "").Replace('\\', '/');
 
         foreach (var node in navNodes)
-        {
-            if (node.FolderPath == "")
-            {
-                // Home — plain link, no details
-                var href = ComputeRelativeHref(currentOutputDir, node.Landing!.RelativeOutput);
-                var active = currentOut.Equals("index.html", StringComparison.OrdinalIgnoreCase) ? " active" : "";
-                sb.AppendLine($"<a href=\"{href}\" class=\"nav-home{active}\">{Encode(node.Title)}</a>");
-            }
-            else
-            {
-                AppendNavNode(sb, node, currentOut, currentOutputDir, depth: 0);
-            }
-        }
+            AppendNavNode(sb, node, currentOut, currentOutputDir, depth: 0);
 
         return sb.ToString();
     }
@@ -181,21 +204,37 @@ internal static class PageRenderer
         string currentOutputDir,
         int depth)
     {
-        var folderNorm = node.FolderPath.Replace('\\', '/');
-        var isActive = currentOut.StartsWith(folderNorm + "/", StringComparison.OrdinalIgnoreCase);
-        var openAttr = isActive ? " open" : "";
+        var hasChildren = node.Children.Count > 0;
+
+        if (!hasChildren
+            && node.Page is not null
+            && node.Title.Equals(node.Page.Title, StringComparison.OrdinalIgnoreCase))
+        {
+            var href = ComputeRelativeHref(currentOutputDir, node.Page.RelativeOutput);
+            var active = currentOut.Equals(node.Page.RelativeOutput.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)
+                ? " active"
+                : "";
+            var cssClass = depth == 0 && node.Page.RelativeOutput.Replace('\\', '/').Equals("index.html", StringComparison.OrdinalIgnoreCase)
+                ? "nav-home"
+                : "nav-link";
+            sb.AppendLine($"<a href=\"{href}\" class=\"{cssClass}{active}\">{Encode(node.Page.Title)}</a>");
+            return;
+        }
+
+        var openAttr = IsNodeActive(node, currentOut) ? " open" : "";
         var summaryClass = depth == 0 ? "nav-section" : "nav-subsection";
         var indent = new string(' ', (depth + 1) * 2);
 
         sb.AppendLine($"<details{openAttr}>");
         sb.AppendLine($"{indent}<summary class=\"{summaryClass}\">{Encode(node.Title)}</summary>");
 
-        if (node.Landing is not null)
+        if (node.Page is not null)
         {
-            var href = ComputeRelativeHref(currentOutputDir, node.Landing.RelativeOutput);
-            var landingOut = node.Landing.RelativeOutput.Replace('\\', '/');
-            var active = currentOut.Equals(landingOut, StringComparison.OrdinalIgnoreCase) ? " active" : "";
-            sb.AppendLine($"{indent}<a href=\"{href}\" class=\"nav-link{active}\">{Encode(node.Landing.Title)}</a>");
+            var href = ComputeRelativeHref(currentOutputDir, node.Page.RelativeOutput);
+            var active = currentOut.Equals(node.Page.RelativeOutput.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)
+                ? " active"
+                : "";
+            sb.AppendLine($"{indent}<a href=\"{href}\" class=\"nav-link{active}\">{Encode(node.Page.Title)}</a>");
         }
 
         foreach (var child in node.Children)
@@ -204,8 +243,15 @@ internal static class PageRenderer
         sb.AppendLine("</details>");
     }
 
-    // Computes relative href from a directory to a file, both relative to the site root.
-    // Uses a dummy absolute root so Path.GetRelativePath works correctly with relative inputs.
+    static bool IsNodeActive(SiteNavNode node, string currentOut)
+    {
+        if (node.Page is not null
+            && currentOut.Equals(node.Page.RelativeOutput.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return node.Children.Any(child => IsNodeActive(child, currentOut));
+    }
+
     internal static string ComputeRelativeHref(string fromDir, string toPath)
     {
         const string root = "C:\\__site__";

@@ -50,10 +50,17 @@ internal static class HtmlTemplate
           </script>
         """;
 
-    private static string MermaidScript(string mermaidJsPath) =>
-        $$"""<script src="{{mermaidJsPath}}"></script><script>mermaid.initialize({startOnLoad:false,theme:'dark'});mermaid.run({querySelector:'.mermaid'});</script>""";
+    private static string MermaidScript(string mermaidJsPath, string mermaidTheme) =>
+        $$"""<script src="{{mermaidJsPath}}"></script><script>mermaid.initialize({startOnLoad:false,theme:'{{mermaidTheme}}'});mermaid.run({querySelector:'.mermaid'});</script>""";
 
-    public static string Render(string title, string siteTitle, string cssPath, string mermaidJsPath, string navHtml, string contentHtml) =>
+    public static string Render(
+        string title,
+        string siteTitle,
+        string cssPath,
+        string mermaidJsPath,
+        string mermaidTheme,
+        string navHtml,
+        string contentHtml) =>
         $"""
         <!DOCTYPE html>
         <html lang="en">
@@ -78,7 +85,7 @@ internal static class HtmlTemplate
             </article>
           </main>
           {Script}
-          {MermaidScript(mermaidJsPath)}
+          {MermaidScript(mermaidJsPath, mermaidTheme)}
         </body>
         </html>
         """;

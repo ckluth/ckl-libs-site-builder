@@ -5,6 +5,19 @@ All notable changes to `CKL.Libs.SiteBuilder` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-07-15
+
+Added hand-authored YAML configuration for scan roots and output location, plus
+theme seams for a replaceable stylesheet and a configurable Mermaid theme.
+Added the authoritative navigation map, its first-run scaffold generator, and
+drift reporting for unplaced documents. The assembler now supports map-driven
+reorder/retitle/skip, synthesises section index pages and an offline search page
+over the in-memory metadata index, and exposes the drift report through the
+config-driven `SiteBuilder.Build(...)` entry point. Implements requirements
+R-09, R-10, R-11, R-12, R-14, R-15, R-16, and R-17, plus the remaining
+search-node half of R-08; see `docs/requirements/README.md`,
+`docs/architecture.md`, and `docs/reference/yaml-schema.md`.
+
 ## [1.2.0] - 2026-07-15
 
 Added the metadata-resolution pass (`CKL.Libs.SiteBuilder.Metadata`): structural

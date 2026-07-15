@@ -68,11 +68,28 @@ public class RendererTests
         Assert.That(model.Succeeded, Is.True);
 
         var introPage = model.Value!.Pages.Single(p => p.SourcePath == introPath);
-        var html = PageRenderer.Render(introPage, model.Value!.Nav, _tempDir, "Test Site");
+        var html = PageRenderer.Render(introPage, model.Value.Nav, _tempDir, "Test Site");
 
         Assert.That(html, Does.Contain("<details"));
         Assert.That(html, Does.Contain("nav-section"));
         Assert.That(html, Does.Contain("Guide"));
+    }
+
+    [Test]
+    public void Render_SourceLessNode_UsesGeneratedHtmlWithoutReadingSource()
+    {
+        var page = new SiteNode(
+            SourcePath: null,
+            RelativeSource: "",
+            RelativeOutput: Path.Combine("guide", "index.html"),
+            Title: "Guide",
+            Kind: SiteNodeKind.NodeIndex,
+            Overrides: SiteNode.NoOverrides,
+            GeneratedHtml: "<h1>Guide</h1><p>Generated.</p>");
+
+        var html = PageRenderer.Render(page, [], _tempDir, "Test Site");
+
+        Assert.That(html, Does.Contain("<p>Generated.</p>"));
     }
 
     string WriteFile(string relativePath, string content)
