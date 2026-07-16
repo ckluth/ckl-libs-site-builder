@@ -88,6 +88,16 @@ public class AssemblerTests
             Assert.That(guideIndex.RelativeOutput.Replace('\\', '/'), Is.EqualTo("guide/index.html"));
             Assert.That(search.RelativeOutput.Replace('\\', '/'), Is.EqualTo("search/index.html"));
         });
+
+        // Search result links must be relative to the search page's own
+        // directory (search/), not the site root — otherwise clicking a result
+        // resolves to search/guide/... and 404s.
+        Assert.Multiple(() =>
+        {
+            Assert.That(search.GeneratedHtml, Does.Contain("\"url\":\"../guide/advanced-first.html\""));
+            Assert.That(search.GeneratedHtml, Does.Contain("\"url\":\"../guide/introduction.html\""));
+            Assert.That(search.GeneratedHtml, Does.Not.Contain("\"url\":\"guide/"));
+        });
     }
 
     [Test]

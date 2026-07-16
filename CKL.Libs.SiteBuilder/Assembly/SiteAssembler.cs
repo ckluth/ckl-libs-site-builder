@@ -263,7 +263,7 @@ internal static class SiteAssembler
                     metadata?.Title ?? page.Title,
                     metadata?.Tags?.ToArray() ?? [],
                     metadata?.Summary,
-                    page.RelativeOutput.Replace('\\', '/'));
+                    ComputeRelativeHrefForGeneratedPage(relativeOutput, page.RelativeOutput));
             })
             .OrderBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
             .ToArray();

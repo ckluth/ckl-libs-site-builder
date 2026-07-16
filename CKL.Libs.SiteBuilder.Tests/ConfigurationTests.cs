@@ -196,7 +196,7 @@ public class ConfigurationTests
         {
             Assert.That(searchHtml, Does.Contain("\"title\":\"Guide\""));
             Assert.That(searchHtml, Does.Contain("\"summary\":\"Quick summary\""));
-            Assert.That(searchHtml, Does.Contain("\"url\":\"guide.html\""));
+            Assert.That(searchHtml, Does.Contain("\"url\":\"../guide.html\""));
         });
 
         var jsonFiles = Directory.GetFiles(_outputDir, "*.json", SearchOption.AllDirectories);
