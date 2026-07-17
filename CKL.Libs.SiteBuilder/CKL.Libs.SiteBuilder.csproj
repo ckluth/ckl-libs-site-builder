@@ -10,7 +10,7 @@
 		<AssemblyName>CKL.Libs.SiteBuilder</AssemblyName>
 		<RootNamespace>CKL.Libs.SiteBuilder</RootNamespace>
 		<PlatformTarget>AnyCPU</PlatformTarget>
-		<Version>1.5.0</Version>
+		<Version>1.6.0</Version>
 		<Authors>ckluth</Authors>
 		<Description>Assembles scattered markdown across one or many repositories into a single, navigable, self-contained static HTML site.</Description>
 		<PackageId>CKL.Libs.SiteBuilder</PackageId>

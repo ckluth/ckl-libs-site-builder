@@ -157,7 +157,16 @@ internal static class SiteAssembler
 
         foreach (var entry in entries)
         {
-            var slug = ReserveSlug(reservedSlugs, Slugify(entry.Title));
+            var effectiveTitle = entry.Title;
+            if (string.IsNullOrWhiteSpace(effectiveTitle)
+                && !string.IsNullOrWhiteSpace(entry.Source)
+                && !IsWildcardSource(entry.Source!)
+                && bySource.TryGetValue(entry.Source!, out var titleSource))
+            {
+                effectiveTitle = titleSource.Title;
+            }
+
+            var slug = ReserveSlug(reservedSlugs, Slugify(effectiveTitle));
 
             if (entry.Skip)
             {
@@ -188,8 +197,12 @@ internal static class SiteAssembler
                         }
                     }
 
-                    foreach (var excludedSource in matches.Where(source => excludeSet.Contains(WildcardMatcher.Normalize(source))))
-                        AddPlacedSource(excludedSource, placedSources);
+                    // 'exclude:' is a section-scoped drift-acknowledgment (ADR-0031), not an exclusive
+                    // claim: an excluded source is omitted from this wildcard's syntheticChildren below
+                    // and is already counted as placed by DriftDetector, but it is deliberately NOT added
+                    // to placedSources here, so another section may still claim it via an explicit
+                    // 'source:' entry. AddPlacedSource's "places … more than once" guard remains intact
+                    // for two literal 'source:' entries claiming the same file.
 
                     var syntheticChildren = matches
                         .Where(source => !excludeSet.Contains(WildcardMatcher.Normalize(source)))
@@ -227,9 +240,9 @@ internal static class SiteAssembler
 
                 EnsureOutputAvailable(relativeOutput, usedOutputs);
 
-                var node = discovered.ToMappedSiteNode(entry.Title, relativeOutput, kind);
+                var node = discovered.ToMappedSiteNode(effectiveTitle, relativeOutput, kind);
                 pages.Add(node);
-                navNodes.Add(new SiteNavNode(entry.Title, new SiteNavPage(entry.Title, relativeOutput), []));
+                navNodes.Add(new SiteNavNode(effectiveTitle, new SiteNavPage(effectiveTitle, relativeOutput), []));
                 continue;
             }
 

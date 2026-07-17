@@ -118,15 +118,17 @@ internal static class NavMapFile
 
     static NavMapEntry MapEntry(NavMapEntryYaml entry)
     {
-        if (string.IsNullOrWhiteSpace(entry.Title))
-            throw new InvalidOperationException("Every nav map entry must define a title.");
-
         var children = (entry.Children ?? []).Select(MapEntry).ToArray();
         var source = string.IsNullOrWhiteSpace(entry.Source) ? null : entry.Source!.Trim();
         var isWildcard = source is not null && (source.Contains('*') || source.Contains('?'));
         var home = entry.Home ?? false;
         var section = SectionBehaviourParser.TryParse(entry.Section);
-        var title = entry.Title.Trim();
+
+        var isSingleFileEntry = source is not null && !isWildcard && children.Length == 0;
+        if (string.IsNullOrWhiteSpace(entry.Title) && !isSingleFileEntry)
+            throw new InvalidOperationException("Every nav map entry must define a title.");
+
+        var title = string.IsNullOrWhiteSpace(entry.Title) ? "" : entry.Title.Trim();
         var titleFrom = string.IsNullOrWhiteSpace(entry.TitleFrom) ? null : entry.TitleFrom!.Trim();
         var intro = string.IsNullOrWhiteSpace(entry.Intro) ? null : entry.Intro.Trim();
         var exclude = (entry.Exclude ?? [])

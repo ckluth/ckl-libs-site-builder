@@ -77,7 +77,12 @@ nav:
 ```
 
 - `nav` — required root sequence of entries.
-- `title` — required output label.
+- `title` — required output label on a **section** (`children`) or **wildcard**
+  (`source` with `*`/`?`) entry. On a **single-file** entry (`source`, non-wildcard,
+  no `children`) it may be left empty (omitted or blank): the title is then derived
+  from the source document's first H1, falling back to a formatted filename when no
+  H1 is present — the same resolution wildcard `titleFrom: headline` children use.
+  A non-empty title on a single-file entry is used verbatim, as today.
 - `source` — optional source document path, relative to a configured scan root.
   When it contains `*` or `?`, it becomes a wildcard section that expands at
   assembly time against discovered relative source paths. Matching is
@@ -103,8 +108,11 @@ nav:
   from the matched document's first H1, falling back to a formatted filename when
   no H1 is present.
 - `exclude` — optional, on a wildcard `source` entry only. A list of literal
-  relative source paths omitted from the expansion and treated as placed (like
-  `skip: true`), so they do not render and do not produce drift.
+  relative source paths omitted from *this* wildcard's expansion and treated as a
+  section-scoped drift-acknowledgment (like `skip: true`): they never render via
+  this wildcard and never produce drift, but they are **not** exclusively claimed —
+  another section may still place the same file via its own explicit `source:`
+  entry and render it there.
 - `intro` — optional on a section (`children`) entry or wildcard section. When
   that section renders an `overview` page, the intro is rendered as Markdown
   above the generated listing. On an `expand` section it is ignored with a

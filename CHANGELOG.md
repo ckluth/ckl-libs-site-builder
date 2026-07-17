@@ -5,6 +5,21 @@ All notable changes to `CKL.Libs.SiteBuilder` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-07-17
+
+Adds an empty (trimmed) `title:` fallback on single-file nav entries: when a
+non-wildcard, non-section entry's title is omitted or blank, the title is
+derived from the source document's first H1, falling back to a formatted
+filename when no H1 exists — the same resolution wildcard `titleFrom:
+headline` entries already use. A section or wildcard entry still requires a
+non-empty title.
+
+Changes `exclude:` on a wildcard nav entry from an exclusive claim to a
+section-scoped drift-acknowledgment: an excluded file is still omitted from
+that wildcard's expansion and never reported as drift, but it no longer
+reserves the file exclusively — another section may place it via an explicit
+`source:` entry and render it there.
+
 ## [1.5.0] - 2026-07-17
 
 Adds wildcard `source:` nav entries that expand live against discovered markdown,

@@ -1,3 +1,4 @@
+using CKL.Libs.ResultPattern;
 using CKL.Libs.SiteBuilder.Assembly;
 using CKL.Libs.SiteBuilder.Configuration;
 using CKL.Libs.SiteBuilder.Model;
@@ -325,6 +326,95 @@ public class NavPathTests
 
         Assert.That(result.Succeeded, Is.False);
         Assert.That(File.Exists(existingPath), Is.True);
+    }
+
+    // --- Empty-title single-file entry derives headline (ADR-0030) ------------------------------
+
+    [Test]
+    public void AssembleConfigured_EmptyTitleSingleFileEntry_DerivesTitleFromH1()
+    {
+        var sourceDir = Directory.CreateDirectory(Path.Combine(_workspace, "src")).FullName;
+        WriteFile(Path.Combine(sourceDir, "guide", "intro.md"), "# Introduction\n");
+
+        var navMap = new NavMap([
+            new NavMapEntry("", Path.Combine("guide", "intro.md"), [])
+        ]);
+
+        var result = SiteAssembler.AssembleConfigured([sourceDir], navMap);
+        Assert.That(result.Succeeded, Is.True);
+
+        var model = result.Value!.Site;
+        var page = model.Pages.Single(p => p.RelativeSource == Path.Combine("guide", "intro.md"));
+        Assert.That(page.Title, Is.EqualTo("Introduction"));
+        Assert.That(page.RelativeOutput.Replace('\\', '/'), Does.EndWith("introduction.html"));
+
+        var navNode = model.Nav.Single(n => n.Title == "Introduction");
+        Assert.That(navNode.Page!.RelativeOutput, Is.EqualTo(page.RelativeOutput));
+    }
+
+    [Test]
+    public void AssembleConfigured_EmptyTitleSingleFileEntry_NoH1_FallsBackToFormattedFilename()
+    {
+        var sourceDir = Directory.CreateDirectory(Path.Combine(_workspace, "src")).FullName;
+        WriteFile(Path.Combine(sourceDir, "0007-my-doc.md"), "Body text only, no headline.\n");
+
+        var navMap = new NavMap([
+            new NavMapEntry("", "0007-my-doc.md", [])
+        ]);
+
+        var result = SiteAssembler.AssembleConfigured([sourceDir], navMap);
+        Assert.That(result.Succeeded, Is.True);
+
+        var expectedTitle = SiteAssembler.FormatName("0007-my-doc");
+        var page = result.Value!.Site.Pages.Single(p => p.RelativeSource == "0007-my-doc.md");
+        Assert.That(page.Title, Is.EqualTo(expectedTitle));
+    }
+
+    [Test]
+    public void AssembleConfigured_NonEmptyTitleSingleFileEntry_IsUsedVerbatim()
+    {
+        var sourceDir = Directory.CreateDirectory(Path.Combine(_workspace, "src")).FullName;
+        WriteFile(Path.Combine(sourceDir, "guide", "intro.md"), "# Introduction\n");
+
+        var navMap = new NavMap([
+            new NavMapEntry("Custom", Path.Combine("guide", "intro.md"), [])
+        ]);
+
+        var result = SiteAssembler.AssembleConfigured([sourceDir], navMap);
+        Assert.That(result.Succeeded, Is.True);
+
+        var page = result.Value!.Site.Pages.Single(p => p.RelativeSource == Path.Combine("guide", "intro.md"));
+        Assert.That(page.Title, Is.EqualTo("Custom"));
+    }
+
+    [Test]
+    public void NavMapFile_EmptyTitleOnSectionOrWildcardEntry_FailsToParse()
+    {
+        var sectionResult = ReadNav("""
+            nav:
+              - title:
+                children:
+                  - title: Intro
+                    source: guide\intro.md
+            """);
+        var wildcardResult = ReadNav("""
+            nav:
+              - title:
+                source: ideas\*.md
+            """);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(sectionResult.Succeeded, Is.False);
+            Assert.That(wildcardResult.Succeeded, Is.False);
+        });
+    }
+
+    Result<NavMap> ReadNav(string yaml)
+    {
+        var navPath = Path.Combine(_workspace, Guid.NewGuid().ToString("N") + ".yml");
+        File.WriteAllText(navPath, yaml);
+        return NavMapFile.Read(navPath);
     }
 
     static void WriteFile(string path, string content)

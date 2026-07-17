@@ -51,8 +51,13 @@ from the map is reported as "unplaced" (drift detection) and never silently
 dropped. Location and navigation are thereby kept as separate concerns.
 A nav-map section may also use a wildcard `source:` pattern, which expands
 **at assembly time** against the discovered relative source set, with optional
-literal `exclude:` paths treated as placed-but-not-rendered omissions. The
-assembler also carries a general non-fatal warnings channel (separate from
+literal `exclude:` paths treated as a section-scoped drift-acknowledgment: they
+are omitted from that wildcard's own rendering and never reported as drift, but
+are not exclusively claimed, so another section may still place the same file
+via its own explicit `source:` entry. A single-file (non-wildcard) nav entry may
+also leave `title:` empty, in which case the title is inherited from the
+discovered document (its first H1, or a formatted filename) at assembly time.
+The assembler also carries a general non-fatal warnings channel (separate from
 drift) for ignored intros, unmatched wildcard excludes, and similar
 author-feedback cases.
 

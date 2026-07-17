@@ -169,6 +169,56 @@ public class WildcardNavTests
         });
     }
 
+    // --- Section-scoped exclude reuse (ADR-0031) -------------------------------------------------
+
+    [Test]
+    public void WildcardExclude_ExcludedFileReusedInAnotherSection_RendersThereWithNoDriftOrDoubleClaim()
+    {
+        var sourceDir = Directory.CreateDirectory(Path.Combine(_workspace, "src")).FullName;
+        WriteFile(Path.Combine(sourceDir, "decisions", "0001-a.md"), "# Alpha\n");
+        WriteFile(Path.Combine(sourceDir, "decisions", "0002-b.md"), "# Beta\n");
+        WriteFile(Path.Combine(sourceDir, "decisions", "0003-c.md"), "# Gamma\n");
+
+        var navMap = new NavMap([
+            new NavMapEntry("Decisions", @"decisions\*.md", [], Exclude: [@"decisions\0001-a.md"]),
+            new NavMapEntry("Foundations", @"decisions\0001-a.md", [])
+        ]);
+
+        var result = SiteAssembler.AssembleConfigured([sourceDir], navMap);
+
+        Assert.That(result.Succeeded, Is.True);
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Value!.UnplacedDocuments, Is.Empty);
+
+            var decisions = result.Value.Site.Nav.Single(node => node.Title == "Decisions");
+            Assert.That(decisions.Children.Any(child => SamePath(child.Page!.RelativeOutput, @"decisions\0001-a.md")), Is.False);
+            Assert.That(decisions.Children.Select(child => child.Title), Does.Not.Contain("Alpha"));
+
+            var foundations = result.Value.Site.Nav.Single(node => node.Title == "Foundations");
+            Assert.That(foundations.Page, Is.Not.Null);
+
+            Assert.That(result.Value.Site.Pages.Count(page => SamePath(page.RelativeSource, @"decisions\0001-a.md")), Is.EqualTo(1));
+        });
+    }
+
+    [Test]
+    public void TwoLiteralSourceEntries_ClaimingSameFile_StillFails()
+    {
+        var sourceDir = Directory.CreateDirectory(Path.Combine(_workspace, "src")).FullName;
+        WriteFile(Path.Combine(sourceDir, "decisions", "0001-a.md"), "# Alpha\n");
+
+        var navMap = new NavMap([
+            new NavMapEntry("Alpha", @"decisions\0001-a.md", []),
+            new NavMapEntry("Alpha Again", @"decisions\0001-a.md", [])
+        ]);
+
+        var result = SiteAssembler.AssembleConfigured([sourceDir], navMap);
+
+        Assert.That(result.Succeeded, Is.False);
+        Assert.That(result.ErrorMessage, Does.Contain("more than once"));
+    }
+
     Result<NavMap> ReadNav(string yaml)
     {
         var navPath = Path.Combine(_workspace, Guid.NewGuid().ToString("N") + ".yml");
