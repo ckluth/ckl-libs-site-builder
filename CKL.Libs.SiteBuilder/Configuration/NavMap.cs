@@ -32,13 +32,40 @@ internal static class SectionBehaviourParser
     };
 }
 
-internal sealed record NavMapEntry(
-    string Title,
-    string? Source,
-    IReadOnlyList<NavMapEntry> Children,
-    bool Skip = false,
-    bool Home = false,
-    SectionBehaviour? Section = null);
+internal sealed record NavMapEntry
+{
+    public NavMapEntry(
+        string Title,
+        string? Source,
+        IReadOnlyList<NavMapEntry> Children,
+        bool Skip = false,
+        bool Home = false,
+        SectionBehaviour? Section = null,
+        string? TitleFrom = null,
+        IReadOnlyList<string>? Exclude = null,
+        string? Intro = null)
+    {
+        this.Title = Title;
+        this.Source = Source;
+        this.Children = Children;
+        this.Skip = Skip;
+        this.Home = Home;
+        this.Section = Section;
+        this.TitleFrom = TitleFrom;
+        this.Exclude = Exclude ?? [];
+        this.Intro = Intro;
+    }
+
+    public string Title { get; init; }
+    public string? Source { get; init; }
+    public IReadOnlyList<NavMapEntry> Children { get; init; }
+    public bool Skip { get; init; }
+    public bool Home { get; init; }
+    public SectionBehaviour? Section { get; init; }
+    public string? TitleFrom { get; init; }
+    public IReadOnlyList<string> Exclude { get; init; }
+    public string? Intro { get; init; }
+}
 
 internal static class NavMapFile
 {
@@ -96,8 +123,16 @@ internal static class NavMapFile
 
         var children = (entry.Children ?? []).Select(MapEntry).ToArray();
         var source = string.IsNullOrWhiteSpace(entry.Source) ? null : entry.Source!.Trim();
+        var isWildcard = source is not null && (source.Contains('*') || source.Contains('?'));
         var home = entry.Home ?? false;
         var section = SectionBehaviourParser.TryParse(entry.Section);
+        var title = entry.Title.Trim();
+        var titleFrom = string.IsNullOrWhiteSpace(entry.TitleFrom) ? null : entry.TitleFrom!.Trim();
+        var intro = string.IsNullOrWhiteSpace(entry.Intro) ? null : entry.Intro.Trim();
+        var exclude = (entry.Exclude ?? [])
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .ToArray();
 
         if (source is not null && children.Length > 0)
             throw new InvalidOperationException(
@@ -107,7 +142,35 @@ internal static class NavMapFile
             throw new InvalidOperationException(
                 $"The nav map entry '{entry.Title}' cannot be 'home: true' without a 'source'.");
 
-        return new NavMapEntry(entry.Title.Trim(), source, children, entry.Skip ?? false, home, section);
+        if (isWildcard && children.Length > 0)
+            throw new InvalidOperationException(
+                $"The nav map entry '{entry.Title}' cannot define both a wildcard 'source' and 'children'.");
+
+        if (isWildcard && home)
+            throw new InvalidOperationException(
+                $"The nav map entry '{entry.Title}' cannot combine a wildcard 'source' with 'home: true'.");
+
+        if (isWildcard && (entry.Skip ?? false))
+            throw new InvalidOperationException(
+                $"The nav map entry '{entry.Title}' cannot combine a wildcard 'source' with 'skip: true'.");
+
+        if (titleFrom is not null && !titleFrom.Equals("headline", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"The nav map entry '{entry.Title}' has invalid 'titleFrom: {entry.TitleFrom}'; expected 'headline'.");
+
+        if (!isWildcard && titleFrom is not null)
+            throw new InvalidOperationException(
+                $"The nav map entry '{entry.Title}' cannot define 'titleFrom' unless 'source' is a wildcard.");
+
+        if (!isWildcard && exclude.Length > 0)
+            throw new InvalidOperationException(
+                $"The nav map entry '{entry.Title}' cannot define 'exclude' unless 'source' is a wildcard.");
+
+        if (source is not null && !isWildcard && intro is not null)
+            throw new InvalidOperationException(
+                $"The nav map entry '{entry.Title}' cannot define 'intro' because intro is only valid on a section or wildcard entry.");
+
+        return new NavMapEntry(title, source, children, entry.Skip ?? false, home, section, titleFrom, exclude, intro);
     }
 
     static NavMapEntryYaml MapEntry(NavMapEntry entry) =>
@@ -118,7 +181,10 @@ internal static class NavMapFile
             Children = entry.Children.Count == 0 ? null : entry.Children.Select(MapEntry).ToList(),
             Skip = entry.Skip ? true : null,
             Home = entry.Home ? true : null,
-            Section = SectionBehaviourParser.ToYaml(entry.Section)
+            Section = SectionBehaviourParser.ToYaml(entry.Section),
+            TitleFrom = entry.TitleFrom,
+            Exclude = entry.Exclude.Count == 0 ? null : entry.Exclude.ToList(),
+            Intro = entry.Intro
         };
 
     sealed class NavMapYaml
@@ -134,5 +200,8 @@ internal static class NavMapFile
         public bool? Skip { get; set; }
         public bool? Home { get; set; }
         public string? Section { get; set; }
+        public string? TitleFrom { get; set; }
+        public List<string>? Exclude { get; set; }
+        public string? Intro { get; set; }
     }
 }

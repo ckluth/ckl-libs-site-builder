@@ -7,7 +7,8 @@ internal sealed record SiteConfig(
     SiteThemeConfig Theme,
     string? NavMapPath,
     SectionBehaviour SectionBehaviour,
-    IReadOnlyList<string> AssetExcludes);
+    IReadOnlyList<string> AssetExcludes,
+    string? Intro);
 
 internal sealed record SiteThemeConfig(
     string? StylesheetPath,

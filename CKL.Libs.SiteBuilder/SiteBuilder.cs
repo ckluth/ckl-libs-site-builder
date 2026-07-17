@@ -11,9 +11,11 @@ namespace CKL.Libs.SiteBuilder;
 /// <summary>The observable result of a config-driven site build.</summary>
 /// <param name="OutputDirectory">The directory the build wrote to.</param>
 /// <param name="UnplacedDocuments">Any discovered source documents absent from the authoritative nav map.</param>
+/// <param name="Warnings">Non-fatal build warnings surfaced during assembly.</param>
 public sealed record SiteBuildReport(
     string OutputDirectory,
-    IReadOnlyList<string> UnplacedDocuments);
+    IReadOnlyList<string> UnplacedDocuments,
+    IReadOnlyList<string> Warnings);
 
 /// <summary>Options controlling a SiteBuilder run.</summary>
 /// <param name="SourceDirectory">The legacy single scan root for direct-options builds.</param>
@@ -24,6 +26,7 @@ public sealed record SiteBuildReport(
 /// <param name="ScanRoots">The configured scan roots; when omitted, <paramref name="SourceDirectory"/> is used.</param>
 /// <param name="StylesheetPath">An optional stylesheet whose contents replace the built-in CSS.</param>
 /// <param name="MermaidTheme">The Mermaid theme name emitted into the rendered template.</param>
+/// <param name="Intro">Optional markdown rendered above the synthesised landing page listing.</param>
 public sealed record SiteBuilderOptions(
     string SourceDirectory,
     string OutputDirectory,
@@ -32,7 +35,8 @@ public sealed record SiteBuilderOptions(
     IMetadataInference? MetadataInference = null,
     IReadOnlyList<string>? ScanRoots = null,
     string? StylesheetPath = null,
-    string MermaidTheme = "dark")
+    string MermaidTheme = "dark",
+    string? Intro = null)
 {
     internal IReadOnlyList<string> EffectiveScanRoots =>
         ScanRoots is { Count: > 0 } ? ScanRoots : [SourceDirectory];
@@ -41,7 +45,8 @@ public sealed record SiteBuilderOptions(
 /// <summary>The public entry point of the SiteBuilder pipeline.</summary>
 public static class SiteBuilder
 {
-    /// <summary>Builds a site from direct options, preserving the legacy single-root calling shape.</summary>
+    /// <summary>Builds a site from direct options, preserving the legacy single-root calling shape.
+    /// Warnings are not surfaced through this legacy overload; use the config-driven overload to observe them.</summary>
     public static Result Build(SiteBuilderOptions options)
     {
         var build = BuildCore(options, null);
@@ -81,9 +86,10 @@ public static class SiteBuilder
                 MetadataInference: metadataInference,
                 ScanRoots: config.Value.ScanRoots,
                 StylesheetPath: config.Value.Theme.StylesheetPath,
-                MermaidTheme: config.Value.Theme.MermaidTheme);
+                MermaidTheme: config.Value.Theme.MermaidTheme,
+                Intro: config.Value.Intro);
 
-            return BuildCore(options, navMap, config.Value.SectionBehaviour, config.Value.AssetExcludes);
+            return BuildCore(options, navMap, config.Value.SectionBehaviour, config.Value.AssetExcludes, config.Value.Intro);
         }
         catch (Exception ex)
         {
@@ -95,7 +101,8 @@ public static class SiteBuilder
         SiteBuilderOptions options,
         NavMap? navMap,
         SectionBehaviour sectionBehaviour = SectionBehaviour.Expand,
-        IReadOnlyList<string>? assetExcludes = null)
+        IReadOnlyList<string>? assetExcludes = null,
+        string? siteIntro = null)
     {
         try
         {
@@ -116,7 +123,12 @@ public static class SiteBuilder
                 effectiveNavMap = scaffold.Value;
             }
 
-            var assembly = SiteAssembler.AssembleConfigured(options.EffectiveScanRoots, effectiveNavMap, options.MetadataInference, sectionBehaviour);
+            var assembly = SiteAssembler.AssembleConfigured(
+                options.EffectiveScanRoots,
+                effectiveNavMap,
+                options.MetadataInference,
+                sectionBehaviour,
+                siteIntro ?? options.Intro);
             if (!assembly.Succeeded) return assembly.ToResult<SiteBuildReport>();
 
             var model = assembly.Value.Site;
@@ -153,7 +165,7 @@ public static class SiteBuilder
 
             CopyNonMarkdownAssets(options.EffectiveScanRoots, options.OutputDirectory, assetExcludes ?? []);
 
-            return new SiteBuildReport(options.OutputDirectory, assembly.Value.UnplacedDocuments);
+            return new SiteBuildReport(options.OutputDirectory, assembly.Value.UnplacedDocuments, assembly.Value.Warnings);
         }
         catch (Exception ex)
         {

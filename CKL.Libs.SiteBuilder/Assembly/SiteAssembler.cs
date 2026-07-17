@@ -5,10 +5,15 @@ using CKL.Libs.ResultPattern;
 using CKL.Libs.SiteBuilder.Configuration;
 using CKL.Libs.SiteBuilder.Metadata;
 using CKL.Libs.SiteBuilder.Model;
+using CKL.Libs.SiteBuilder.Rendering;
+using Markdig;
 
 namespace CKL.Libs.SiteBuilder.Assembly;
 
-internal sealed record SiteAssemblyResult(SiteModel Site, IReadOnlyList<string> UnplacedDocuments);
+internal sealed record SiteAssemblyResult(
+    SiteModel Site,
+    IReadOnlyList<string> UnplacedDocuments,
+    IReadOnlyList<string> Warnings);
 
 internal static class SiteAssembler
 {
@@ -27,7 +32,8 @@ internal static class SiteAssembler
         IReadOnlyList<string> scanRoots,
         NavMap navMap,
         IMetadataInference? inference = null,
-        SectionBehaviour sectionBehaviour = SectionBehaviour.Expand)
+        SectionBehaviour sectionBehaviour = SectionBehaviour.Expand,
+        string? siteIntro = null)
     {
         try
         {
@@ -37,10 +43,10 @@ internal static class SiteAssembler
             var discovered = DiscoverPages(scanRoots, metadataIndex.Value);
 
             var drift = DriftDetector.Detect(discovered.Select(page => page.RelativeSource), navMap);
-            var mapped = AssembleFromNavMap(discovered, metadataIndex.Value, navMap, sectionBehaviour);
+            var mapped = AssembleFromNavMap(discovered, metadataIndex.Value, navMap, sectionBehaviour, siteIntro);
             if (!mapped.Succeeded) return mapped.ToResult<SiteAssemblyResult>();
 
-            return new SiteAssemblyResult(mapped.Value, drift);
+            return new SiteAssemblyResult(mapped.Value.Site, drift, mapped.Value.Warnings);
         }
         catch (Exception ex)
         {
@@ -72,11 +78,12 @@ internal static class SiteAssembler
         }
     }
 
-    static Result<SiteModel> AssembleFromNavMap(
+    static Result<SiteAssemblyResult> AssembleFromNavMap(
         IReadOnlyList<DiscoveredPage> discovered,
         MetadataIndex metadataIndex,
         NavMap navMap,
-        SectionBehaviour sectionBehaviour)
+        SectionBehaviour sectionBehaviour,
+        string? siteIntro)
     {
         try
         {
@@ -86,6 +93,7 @@ internal static class SiteAssembler
             var placedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var usedOutputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var homeSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var warnings = new List<string>();
 
             AppendMappedEntries(
                 navMap.Entries,
@@ -96,11 +104,15 @@ internal static class SiteAssembler
                 placedSources,
                 usedOutputs,
                 homeSources,
-                sectionBehaviour);
+                sectionBehaviour,
+                warnings);
+
+            if (homeSources.Count > 0 && !string.IsNullOrWhiteSpace(siteIntro))
+                warnings.Add("The site 'intro' is ignored because a 'home' page is designated.");
 
             if (!usedOutputs.Contains("index.html"))
             {
-                var landingHtml = BuildNodeIndexHtml("Home", "index.html", navNodes);
+                var landingHtml = BuildNodeIndexHtml("Home", "index.html", navNodes, siteIntro);
                 EnsureOutputAvailable("index.html", usedOutputs);
                 pages.Add(new SiteNode(
                     SourcePath: null,
@@ -117,13 +129,15 @@ internal static class SiteAssembler
             pages.Add(searchPage);
             navNodes.Add(new SiteNavNode("Search", new SiteNavPage("Search", searchPage.RelativeOutput), []));
 
-            return new SiteModel(
+            var site = new SiteModel(
                 pages.OrderBy(page => page.RelativeOutput, StringComparer.OrdinalIgnoreCase).ToArray(),
                 navNodes);
+
+            return new SiteAssemblyResult(site, [], warnings);
         }
         catch (Exception ex)
         {
-            return Result<SiteModel>.Fail(ex);
+            return Result<SiteAssemblyResult>.Fail(ex);
         }
     }
 
@@ -136,7 +150,8 @@ internal static class SiteAssembler
         ISet<string> placedSources,
         ISet<string> usedOutputs,
         ISet<string> homeSources,
-        SectionBehaviour sectionBehaviour)
+        SectionBehaviour sectionBehaviour,
+        List<string> warnings)
     {
         var reservedSlugs = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
@@ -152,11 +167,44 @@ internal static class SiteAssembler
 
             if (!string.IsNullOrWhiteSpace(entry.Source))
             {
+                if (IsWildcardSource(entry.Source))
+                {
+                    var matches = bySource.Keys
+                        .Where(source => WildcardMatcher.IsMatch(source, entry.Source))
+                        .ToList();
+                    var excludeSet = entry.Exclude
+                        .Select(WildcardMatcher.Normalize)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var matchedNormalizedSources = matches
+                        .Select(WildcardMatcher.Normalize)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var excludedSource in entry.Exclude)
+                    {
+                        if (!matchedNormalizedSources.Contains(WildcardMatcher.Normalize(excludedSource)))
+                        {
+                            warnings.Add(
+                                $"The wildcard nav entry '{entry.Title}' excludes '{excludedSource}', but no matching source was discovered.");
+                        }
+                    }
+
+                    foreach (var excludedSource in matches.Where(source => excludeSet.Contains(WildcardMatcher.Normalize(source))))
+                        AddPlacedSource(excludedSource, placedSources);
+
+                    var syntheticChildren = matches
+                        .Where(source => !excludeSet.Contains(WildcardMatcher.Normalize(source)))
+                        .OrderBy(source => source, StringComparer.OrdinalIgnoreCase)
+                        .Select(source => new NavMapEntry(bySource[source].Title, source, []))
+                        .ToArray();
+
+                    RenderSection(entry, slug, syntheticChildren);
+                    continue;
+                }
+
                 if (!bySource.TryGetValue(entry.Source!, out var discovered))
                     throw new InvalidOperationException($"The nav map references '{entry.Source}', but no such source document was discovered.");
 
-                if (!placedSources.Add(entry.Source!))
-                    throw new InvalidOperationException($"The nav map places '{entry.Source}' more than once.");
+                AddPlacedSource(entry.Source!, placedSources);
 
                 string relativeOutput;
                 SiteNodeKind kind;
@@ -185,12 +233,17 @@ internal static class SiteAssembler
                 continue;
             }
 
+            RenderSection(entry, slug, entry.Children);
+        }
+
+        void RenderSection(NavMapEntry entry, string slug, IReadOnlyList<NavMapEntry> childEntries)
+        {
             var sectionDirectory = CombineOutput(currentDirectory, slug);
             var childNavNodes = new List<SiteNavNode>();
             var effectiveBehaviour = entry.Section ?? sectionBehaviour;
 
             AppendMappedEntries(
-                entry.Children,
+                childEntries,
                 sectionDirectory,
                 pages,
                 childNavNodes,
@@ -198,14 +251,15 @@ internal static class SiteAssembler
                 placedSources,
                 usedOutputs,
                 homeSources,
-                effectiveBehaviour);
+                effectiveBehaviour,
+                warnings);
 
             if (effectiveBehaviour == SectionBehaviour.Overview)
             {
                 var sectionOutput = Path.Combine(sectionDirectory, "index.html");
                 EnsureOutputAvailable(sectionOutput, usedOutputs);
 
-                var generatedHtml = BuildNodeIndexHtml(entry.Title, sectionOutput, childNavNodes);
+                var generatedHtml = BuildNodeIndexHtml(entry.Title, sectionOutput, childNavNodes, entry.Intro);
                 pages.Add(new SiteNode(
                     SourcePath: null,
                     RelativeSource: "",
@@ -219,11 +273,16 @@ internal static class SiteAssembler
                     entry.Title,
                     new SiteNavPage("Overview", sectionOutput),
                     childNavNodes));
+                return;
             }
-            else
+
+            if (!string.IsNullOrWhiteSpace(entry.Intro))
             {
-                navNodes.Add(new SiteNavNode(entry.Title, null, childNavNodes));
+                warnings.Add(
+                    $"The 'intro' on section '{entry.Title}' is ignored because the section renders no page (section: expand).");
             }
+
+            navNodes.Add(new SiteNavNode(entry.Title, null, childNavNodes));
         }
     }
 
@@ -237,8 +296,7 @@ internal static class SiteAssembler
             if (!bySource.ContainsKey(entry.Source!))
                 throw new InvalidOperationException($"The nav map references '{entry.Source}', but no such source document was discovered.");
 
-            if (!placedSources.Add(entry.Source!))
-                throw new InvalidOperationException($"The nav map places '{entry.Source}' more than once.");
+            AddPlacedSource(entry.Source!, placedSources);
         }
 
         foreach (var child in entry.Children)
@@ -315,10 +373,14 @@ internal static class SiteAssembler
             GeneratedHtml: html);
     }
 
-    static string BuildNodeIndexHtml(string sectionTitle, string currentOutput, IReadOnlyList<SiteNavNode> children)
+    static string BuildNodeIndexHtml(string sectionTitle, string currentOutput, IReadOnlyList<SiteNavNode> children, string? intro)
     {
         var sb = new StringBuilder();
         sb.Append("<h1>").Append(System.Net.WebUtility.HtmlEncode(sectionTitle)).AppendLine("</h1>");
+
+        if (!string.IsNullOrWhiteSpace(intro))
+            sb.AppendLine(Markdown.ToHtml(intro, PageRenderer.Pipeline).TrimEnd());
+
         sb.AppendLine("<ul>");
 
         foreach (var child in children)
@@ -432,6 +494,14 @@ internal static class SiteAssembler
     {
         var normalized = Regex.Replace(value.Trim().ToLowerInvariant(), @"[^a-z0-9]+", "-").Trim('-');
         return normalized.Length == 0 ? "section" : normalized;
+    }
+
+    static bool IsWildcardSource(string source) => source.Contains('*') || source.Contains('?');
+
+    static void AddPlacedSource(string source, ISet<string> placedSources)
+    {
+        if (!placedSources.Add(source))
+            throw new InvalidOperationException($"The nav map places '{source}' more than once.");
     }
 
     static string ReserveSlug(IDictionary<string, int> reserved, string slug)

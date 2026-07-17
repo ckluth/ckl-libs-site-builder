@@ -5,6 +5,15 @@ All notable changes to `CKL.Libs.SiteBuilder` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-07-17
+
+Adds wildcard `source:` nav entries that expand live against discovered markdown,
+derive child titles from each document's headline (`titleFrom: headline`), and
+support named `exclude:` paths treated as placed-but-not-rendered omissions.
+Adds optional Markdown `intro:` text on the synthesised landing page and on
+generated section overview pages. Surfaces non-fatal assembly warnings through
+the config-driven `SiteBuildReport`.
+
 ## [1.4.1] - 2026-07-16
 
 Fixes broken search-result links. The search page lives at `search/index.html`,

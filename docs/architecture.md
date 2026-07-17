@@ -49,14 +49,23 @@ discovered document placed, with no README/`_index`-as-landing special
 casing) on first run, then hand-owned thereafter. A source document absent
 from the map is reported as "unplaced" (drift detection) and never silently
 dropped. Location and navigation are thereby kept as separate concerns.
+A nav-map section may also use a wildcard `source:` pattern, which expands
+**at assembly time** against the discovered relative source set, with optional
+literal `exclude:` paths treated as placed-but-not-rendered omissions. The
+assembler also carries a general non-fatal warnings channel (separate from
+drift) for ignored intros, unmatched wildcard excludes, and similar
+author-feedback cases.
 
 A `section:` config key (`expand` default, or `overview`) sets the default
 section-click behaviour; a nav-map entry may override it per-subtree. An
-`assets: { exclude: [...] }` config key adds directory-name/glob patterns to
-the built-in asset-copy ignore set. The output directory is guarded: a first
-build creates or reuses an empty directory; a rebuild over a directory
-carrying this tool's `.sitebuilder` marker is cleaned and reconciled; a
-non-empty directory without the marker is refused, deleting nothing.
+`intro:` config key adds optional Markdown above the synthesised landing-page
+listing, and a section/wildcard entry may add its own `intro:` above a
+generated `overview` page. An `assets: { exclude: [...] }` config key adds
+directory-name/glob patterns to the built-in asset-copy ignore set. The output
+directory is guarded: a first build creates or reuses an empty directory; a
+rebuild over a directory carrying this tool's `.sitebuilder` marker is cleaned
+and reconciled; a non-empty directory without the marker is refused, deleting
+nothing.
 
 ## Seams
 

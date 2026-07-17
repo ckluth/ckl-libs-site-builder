@@ -56,7 +56,9 @@ internal static class SiteConfigReader
                 .Select(entry => entry.Trim())
                 .ToArray();
 
-            return new SiteConfig(title, outputDirectory, scanRoots, new SiteThemeConfig(stylesheetPath, mermaidTheme), navMapPath, sectionBehaviour, assetExcludes);
+            var intro = string.IsNullOrWhiteSpace(dto.Intro) ? null : dto.Intro.Trim();
+
+            return new SiteConfig(title, outputDirectory, scanRoots, new SiteThemeConfig(stylesheetPath, mermaidTheme), navMapPath, sectionBehaviour, assetExcludes, intro);
         }
         catch (Exception ex)
         {
@@ -83,6 +85,7 @@ internal static class SiteConfigReader
         public string? Nav { get; set; }
         public string? Section { get; set; }
         public AssetsYaml? Assets { get; set; }
+        public string? Intro { get; set; }
     }
 
     sealed class SiteThemeYaml
